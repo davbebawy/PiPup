@@ -444,6 +444,19 @@ path, which on some Fire TVs briefly renegotiates HDMI audio.
 { "id": "doorbell", "title": "Front door", "sound": "default", "soundVolume": 0.8 }
 ```
 
+`opacity` (since the next release, 0..1, default 1): draws the whole popup, media included, at that alpha, so the
+picture behind it stays visible. Works with every media type and with `animation`.
+
+`transparent` (since the next release, `web` media only, default `false`): the WebView paints no background, so a
+page with a transparent `html, body { background: transparent }` shows the TV through it. Combine with
+`"backgroundColor": "#00000000"` and `"padding": 0` for a frameless, see-through overlay:
+
+```json
+{ "id": "score", "duration": 0, "padding": 0, "backgroundColor": "#00000000",
+  "media": { "web": { "uri": "http://192.168.1.96:8123/local/score.html",
+    "width": 420, "height": 900, "transparent": true } } }
+```
+
 `padding` (since 0.19.1, px, default 20): the popup's outer margin around content; `0` gives a
 near-borderless look.
 
