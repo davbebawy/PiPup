@@ -768,6 +768,17 @@ administration at all (`hasSystemFeature(FEATURE_DEVICE_ADMIN)` is false) — a 
 "not granted", and worth distinguishing because `dpm set-active-admin` reports `Success` there
 anyway.
 
+### Settings
+
+| Property      | Value                               |
+| ------------- | ----------------------------------- |
+| Path:         | /settings[?updateChecks=true\|false] |
+| Method:       | GET or POST                         |
+
+Persistent device settings, kept across restarts and updates. `updateChecks` (default
+`true`) switches the twice-daily GitHub release check on or off: a TV kept off the internet on purpose
+then makes no outbound calls. Both methods answer the current values, e.g. `{"updateChecks":false}`.
+
 ### State
 
 | Property      | Value            |

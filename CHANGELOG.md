@@ -7,6 +7,12 @@ Original app by [rogro82](https://github.com/rogro82/PiPup).
 Every version below has a [GitHub release](https://github.com/mhoogenbosch/PiPup/releases) with the
 full story (English and Dutch) and the APK.
 
+## [Unreleased]
+### Added
+- `GET`/`POST /settings`: persistent device settings. `POST /settings?updateChecks=false` stops the
+  twice-daily GitHub release check on TVs that have no internet on purpose; `/state` reports it as
+  `update.checksEnabled`. `POST /update` still works when asked.
+
 ## [v0.21.1] — 2026-09-01 (self-update TLS fix reaches the redirect hop)
 ### Fixed
 - 0.19.3's bundled ISRG Root X1 never protected the actual download: the GitHub asset URL redirects
