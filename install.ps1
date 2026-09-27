@@ -43,7 +43,7 @@ $ErrorActionPreference = 'Continue'
 $Package = 'nl.rogro82.pipup'
 $AdminComponent = "$Package/.AdminReceiver"
 $AccessibilityComponent = "$Package/$Package.PiPupAccessibilityService"
-$Repo = 'mhoogenbosch/PiPup'
+$Repo = 'davbebawy/PiPup'
 $Port = 7979
 
 function Write-Ok    { param($m) Write-Host "  [ok] $m" -ForegroundColor Green }
