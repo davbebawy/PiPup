@@ -7,6 +7,18 @@ Original app by [rogro82](https://github.com/rogro82/PiPup).
 Every version below has a [GitHub release](https://github.com/mhoogenbosch/PiPup/releases) with the
 full story (English and Dutch) and the APK.
 
+## [v0.23.0] - 2026-09-27 (davbebawy fork: push instead of poll, update source)
+### Added
+- Push: `POST /settings?webhook=<url>` makes the app POST its `/state` JSON plus `event` on every
+  change: `popup_shown`, `popup_replaced` (`replacedId`), `popup_removed` (`reason`: expired,
+  cancelled, button, back, watchdog; `removedId`), `started`, `screen_on`, `screen_off`,
+  `permissions`, and `settings` right after the webhook is set. One retry after 2 s, then dropped.
+  `/state.push` reports `supported`, whether a webhook is set, and the last push result.
+- Update source: `POST /settings?updateSource=github:<owner>/<repo>` (default
+  `github:davbebawy/PiPup`) or an `http(s)://` folder holding `releases.json` (GitHub's releases list
+  saved as is) with the APKs next to it, so a TV without internet can update from a LAN mirror.
+  `/state.update.source` reports it. Recommended ha-pipup version now comes from `davbebawy/ha-pipup`.
+
 ## [v0.22.0] - 2026-09-27 (see-through popups, update check switch for LAN-only TVs)
 ### Added
 - `opacity` (0..1) on any popup: the whole popup, media included, is drawn at that alpha, so live TV
