@@ -7,6 +7,21 @@ Original app by [rogro82](https://github.com/rogro82/PiPup).
 Every version below has a [GitHub release](https://github.com/mhoogenbosch/PiPup/releases) with the
 full story (English and Dutch) and the APK.
 
+## [v0.24.0] - 2026-09-27 (davbebawy fork: several popups at once)
+### Changed
+- Each popup id is its own popup window, sized to its content. A popup with a new id opens beside
+  the ones on screen (newest on top) instead of replacing them. Popups without an id share one slot
+  and replace each other, as before. No limit on the count.
+- Same id with new content redraws in place and keeps its place in the stack; `bringToFront: true`
+  opens it on top instead.
+- `/cancel`: `?id=` removes that popup only; no id removes the popup without an id; `?all=true`
+  removes every popup.
+- Back removes the focused popup (one with buttons) only. Each popup has its own timer.
+### Added
+- `/state.popups`: every popup on screen in stack order (`id`, `position`, `duration`, `indefinite`,
+  `elapsed`, `media`). `visible` and `popup` (the top one) stay for older callers.
+- Pushes carry `shownId` on `popup_shown` and `popup_replaced`.
+
 ## [v0.23.0] - 2026-09-27 (davbebawy fork: push instead of poll, update source)
 ### Added
 - Push: `POST /settings?webhook=<url>` makes the app POST its `/state` JSON plus `event` on every
