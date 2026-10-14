@@ -104,8 +104,12 @@ data class PopupProps(
         // hardware decoder), false = always hardware, null/absent = automatic (software on
         // Android < 8 and on Amlogic SoCs, whose hardware decoder shares the video layer with
         // the HDMI input and freezes it when released - reported on a Xiaomi projector).
+        // height: optional explicit box height. When set, the stream area (and its poster)
+        // uses it until the first frame reports the stream's display aspect; without it the
+        // box takes the poster's aspect, which is wrong for anamorphic NVR snapshots.
         data class Video(val uri: String, val width: Int = DEFAULT_MEDIA_WIDTH, val muted: Boolean = false,
-                         val poster: String? = null, val softwareDecoder: Boolean? = null): Media()
+                         val poster: String? = null, val softwareDecoder: Boolean? = null,
+                         val height: Int? = null): Media()
         @JsonIgnoreProperties(ignoreUnknown = true)
         data class Image(val uri: String, val width: Int = DEFAULT_MEDIA_WIDTH): Media()
         @JsonIgnoreProperties(ignoreUnknown = true)

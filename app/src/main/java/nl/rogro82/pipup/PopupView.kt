@@ -418,10 +418,13 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
                 this@Video.visibility = View.VISIBLE
             }
             frame.addView(textureView)
+            val provisionalHeight = provisionalVideoHeight(media.width, media.height)
             attachPoster(frame, media.poster,
-                FrameLayout.LayoutParams(media.width, media.width * 9 / 16).apply { gravity = Gravity.CENTER }
-            ) { pw, ph -> sizeTo(media.width, (media.width.toLong() * ph / pw).toInt()) }
-            sizeTo(media.width, media.width * 9 / 16)
+                FrameLayout.LayoutParams(media.width, provisionalHeight).apply { gravity = Gravity.CENTER }
+            ) { pw, ph ->
+                posterVideoHeight(media.width, media.height, pw, ph)?.let { sizeTo(media.width, it) }
+            }
+            sizeTo(media.width, provisionalHeight)
 
             val isRtsp = uri.startsWith("rtsp://", ignoreCase = true) || uri.startsWith("rtsps://", ignoreCase = true)
             val item = MediaItem.fromUri(uri)
@@ -967,3 +970,14 @@ internal fun heightForDisplayAspect(targetWidth: Int, width: Int, height: Int, p
     val displayWidth = width * ratio
     return Math.round(targetWidth * height / displayWidth)
 }
+
+/// Stream-area height before the first frame: an explicit [requestedHeight], else 16:9.
+internal fun provisionalVideoHeight(width: Int, requestedHeight: Int?): Int =
+    requestedHeight?.takeIf { it > 0 } ?: (width * 9 / 16)
+
+/// Height to resize the stream area to once the poster has decoded, or null to keep the box.
+/// With an explicit [requestedHeight] the box stays put: a camera snapshot can be anamorphic
+/// (an NVR's 704x480 still of a 4:3 picture), so its pixel size is not the stream's shape.
+internal fun posterVideoHeight(width: Int, requestedHeight: Int?, posterWidth: Int, posterHeight: Int): Int? =
+    if (requestedHeight != null && requestedHeight > 0) null
+    else (width.toLong() * posterHeight / posterWidth).toInt()
