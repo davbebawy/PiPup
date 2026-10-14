@@ -43,6 +43,12 @@ data class PopupProps(
     val soundVolume: Float? = null,       // 0..1; device notification volume when omitted
     // 0.19.0: button text size in sp (padding scales along); null = the classic look
     val buttonSize: Float? = null,
+    // Button style, each null = the classic look. Colors are #RRGGBB or #AARRGGBB.
+    val buttonColor: String? = null,        // fill of an unfocused button
+    val buttonFocusColor: String? = null,   // fill of the focused (or pressed) button
+    val buttonTextColor: String? = null,
+    val buttonBorderColor: String? = null,  // outline, both states
+    val buttonCornerRadius: Float? = null,  // px; 0 = square corners
     // 0.19.1: outer padding of the popup in px (the black margin around content);
     // null = the classic 20 px. 0 gives a near-borderless look.
     val padding: Int? = null,
@@ -55,6 +61,18 @@ data class PopupProps(
     // 0.24.0: a redraw of a popup already on screen (same id, new content) normally keeps
     // its place in the stack; true opens it on top of the other popups instead.
     val bringToFront: Boolean = false,
+    // Live badge: a "Live" pill over a stream popup's video, shown once the first frame
+    // renders (never over the poster). liveBadgeColor is #RRGGBB/#AARRGGBB (default amber);
+    // liveBadgePosition is top_left, top_right, bottom_left or bottom_right (default).
+    val liveBadge: Boolean = false,
+    val liveBadgeColor: String? = null,
+    val liveBadgePosition: String? = null,
+    // Full-bleed media: the video/image runs edge to edge across the top of the popup,
+    // its top corners rounded with the popup's; title, message and buttons keep the padding.
+    val mediaFullBleed: Boolean = false,
+    // Inline buttons: the buttons sit at the end of the title/message row instead of on a
+    // row of their own below it, e.g. a single compact "✕".
+    val buttonsInline: Boolean = false,
     // 0.27.0 (#64): line up with the other stacking popups at the same position instead of
     // overlapping them: "vertical" (away from the top/bottom edge; down from the centre for
     // center_left/right) or "horizontal" (away from the left/right edge; rightwards from the
@@ -104,8 +122,12 @@ data class PopupProps(
         // hardware decoder), false = always hardware, null/absent = automatic (software on
         // Android < 8 and on Amlogic SoCs, whose hardware decoder shares the video layer with
         // the HDMI input and freezes it when released - reported on a Xiaomi projector).
+        // height: optional explicit box height. When set, the stream area (and its poster)
+        // uses it until the first frame reports the stream's display aspect; without it the
+        // box takes the poster's aspect, which is wrong for anamorphic NVR snapshots.
         data class Video(val uri: String, val width: Int = DEFAULT_MEDIA_WIDTH, val muted: Boolean = false,
-                         val poster: String? = null, val softwareDecoder: Boolean? = null): Media()
+                         val poster: String? = null, val softwareDecoder: Boolean? = null,
+                         val height: Int? = null): Media()
         @JsonIgnoreProperties(ignoreUnknown = true)
         data class Image(val uri: String, val width: Int = DEFAULT_MEDIA_WIDTH): Media()
         @JsonIgnoreProperties(ignoreUnknown = true)

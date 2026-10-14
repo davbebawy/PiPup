@@ -9,6 +9,20 @@ full story (English and Dutch) and the APK.
 
 ## [Unreleased]
 
+## [v0.28.0] — 2026-10-14 (camera popup look, button style, video height)
+All three contributed by @pelkiegr; each option is off by default, so existing popups are unchanged.
+### Added
+- **Camera popup look** (#71): `liveBadge` (a "Live" pill shown on the first rendered frame, with
+  `liveBadgeColor`/`liveBadgePosition`), `mediaFullBleed` (media edge to edge across the top, top corners
+  rounded with the popup) and `buttonsInline` (buttons at the end of the title/message row).
+- **Button style** (#70): `buttonColor`, `buttonFocusColor`, `buttonTextColor`, `buttonBorderColor`,
+  `buttonCornerRadius`. Malformed colors fall back to the classic look.
+- **`media.video.height`** (#69): a fixed stream-area height until the first frame, so an anamorphic NVR
+  snapshot no longer makes the box jump from poster to stream.
+### Fixed
+- `buttonsInline` on a popup without title, message or icon put the buttons into the removed header row,
+  so they never showed; they now keep their own row.
+
 ## [v0.27.0] — 2026-10-14 (popup stacking)
 ### Added
 - **Popup stacking: `stack: "vertical"` or `"horizontal"`** (#64). A popup lines up with the other
