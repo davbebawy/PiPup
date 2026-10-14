@@ -55,6 +55,18 @@ data class PopupProps(
     // 0.24.0: a redraw of a popup already on screen (same id, new content) normally keeps
     // its place in the stack; true opens it on top of the other popups instead.
     val bringToFront: Boolean = false,
+    // Live badge: a "Live" pill over a stream popup's video, shown once the first frame
+    // renders (never over the poster). liveBadgeColor is #RRGGBB/#AARRGGBB (default amber);
+    // liveBadgePosition is top_left, top_right, bottom_left or bottom_right (default).
+    val liveBadge: Boolean = false,
+    val liveBadgeColor: String? = null,
+    val liveBadgePosition: String? = null,
+    // Full-bleed media: the video/image runs edge to edge across the top of the popup,
+    // its top corners rounded with the popup's; title, message and buttons keep the padding.
+    val mediaFullBleed: Boolean = false,
+    // Inline buttons: the buttons sit at the end of the title/message row instead of on a
+    // row of their own below it, e.g. a single compact "✕".
+    val buttonsInline: Boolean = false,
     // 0.27.0 (#64): line up with the other stacking popups at the same position instead of
     // overlapping them: "vertical" (away from the top/bottom edge; down from the centre for
     // center_left/right) or "horizontal" (away from the left/right edge; rightwards from the

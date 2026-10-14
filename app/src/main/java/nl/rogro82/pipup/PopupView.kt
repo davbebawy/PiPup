@@ -63,12 +63,70 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
     /// seconds ago beats an empty frame, so there is deliberately no timeout.
     protected var mPoster: ImageView? = null
 
+    /// "Live" pill over the stream area, hidden until the first frame renders.
+    protected var mLiveBadge: TextView? = null
+
+    protected fun attachLiveBadge(frame: FrameLayout) {
+        if (!popup.liveBadge || mLiveBadge != null) return
+        val badge = TextView(context).apply {
+            text = "Live"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setPadding(18, 6, 18, 6)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = 999f
+                setColor(parseColorOrDefault(popup.liveBadgeColor ?: DEFAULT_LIVE_BADGE_COLOR, DEFAULT_LIVE_BADGE_COLOR))
+            }
+            elevation = 4f
+            alpha = 0f
+            visibility = View.GONE
+        }
+        frame.addView(badge, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+            liveBadgeGravity(popup.liveBadgePosition)
+        ).apply { setMargins(16, 16, 16, 16) })
+        mLiveBadge = badge
+    }
+
+    private fun revealLiveBadge() {
+        val badge = mLiveBadge ?: return
+        if (badge.visibility == View.VISIBLE) return
+        badge.visibility = View.VISIBLE
+        badge.bringToFront()
+        badge.animate().alpha(1f).setDuration(150).start()
+    }
+
+    /// Full-bleed layout: the popup keeps only its border inset, so the media frame spans the
+    /// whole width with its top corners clipped to the popup's; the text and button rows carry
+    /// the padding instead (the buttons row sets its own when it is built).
+    private fun applyFullBleed(frame: FrameLayout, header: LinearLayout, pad: Int, border: Int, radius: Float) {
+        // compact text block under the media, like a TV camera notification: a smaller gap
+        // above and below, and no extra font padding between title and message
+        val gap = (pad * 2) / 3
+        setPadding(border, border, border, gap)
+        frame.setPadding(0, 0, 0, 0)
+        header.setPadding(pad, gap, pad, 0)
+        header.findViewById<TextView>(R.id.popup_title)?.includeFontPadding = false
+        header.findViewById<TextView>(R.id.popup_message)?.includeFontPadding = false
+        val clip = (radius - border).coerceAtLeast(0f)
+        frame.outlineProvider = object : android.view.ViewOutlineProvider() {
+            override fun getOutline(view: View, outline: android.graphics.Outline) {
+                // extend below the frame so only the top corners are rounded
+                outline.setRoundRect(0, 0, view.width, view.height + clip.toInt(), clip)
+            }
+        }
+        frame.clipToOutline = clip > 0f
+    }
+
     /// `onSized` receives the poster's intrinsic width/height once decoded, so the caller can
     /// give the stream area the poster's aspect ratio right away. A camera snapshot has the same
     /// aspect as the camera's stream, so still and live then line up exactly and the hand-over
     /// shows no size jump (a provisional 16:9 box letterboxed a 4:3 snapshot, then jumped).
     protected fun attachPoster(frame: FrameLayout, url: String?, params: FrameLayout.LayoutParams,
                                onSized: ((Int, Int) -> Unit)? = null) {
+        attachLiveBadge(frame)   // every live stream area gets its poster here, so its badge too
         if (url.isNullOrEmpty()) return
         val iv = ImageView(context).apply {
             scaleType = ImageView.ScaleType.FIT_XY   // box already has the image's aspect
@@ -102,6 +160,7 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
             Log.d(LOG_TAG, "first frame after ${ms} ms" + (if (mPoster != null) " (poster shown)" else ""))
             try { onFirstFrame?.invoke(ms) } catch (_: Throwable) {}
         }
+        revealLiveBadge()
         val iv = mPoster ?: return
         mPoster = null
         iv.animate().alpha(0f).setDuration(150).withEndAction {
@@ -134,7 +193,8 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
         // 0.19.1: configurable outer padding; the focus scale-up of buttons and the
         // slide animations may paint outside their box, so never clip children.
         val pad = popup.padding ?: 20
-        setPadding(pad, pad, pad, pad)
+        val fullBleed = popup.mediaFullBleed && popup.media != null
+        if (!fullBleed) setPadding(pad, pad, pad, pad)
         clipChildren = false
         clipToPadding = false
 
@@ -203,8 +263,10 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
                 setStroke(width, parseColorOrDefault(color, PopupProps.DEFAULT_BORDER_COLOR))
             }
             // rounded corners keep working without a border, and an explicit 0 squares them off
-            cornerRadius = popup.cornerRadius
+            val radius = popup.cornerRadius
                 ?: if (width != null && width > 0) PopupProps.DEFAULT_CORNER_RADIUS else 0f
+            cornerRadius = radius
+            if (fullBleed) applyFullBleed(frame, header, pad, width?.takeIf { it > 0 } ?: 0, radius)
         }
 
         // DPAD-focusable buttons (the service makes the overlay window focusable).
@@ -226,6 +288,7 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
                 gravity = Gravity.CENTER
                 clipChildren = false
                 clipToPadding = false
+                if (fullBleed) setPadding(pad, 0, pad, 0)
             }
             var firstButton: Button? = null
             popup.buttons.forEach { btn ->
@@ -263,7 +326,12 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
                     setMargins(m(10), m(10), m(10), m(6))
                 })
             }
-            addView(row, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+            if (popup.buttonsInline) {
+                row.setPadding(0, 0, 0, 0)
+                header.addView(row, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+            } else {
+                addView(row, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+            }
             // Give the first button focus once the view is attached, so there is a
             // visible highlight before the user touches the remote.
             firstButton?.post { firstButton?.requestFocus() }
@@ -851,6 +919,9 @@ video{width:100%;height:100%;object-fit:contain;background:__BG__}</style></head
         /// Bright fill shown on the focused popup button. White text stays readable on it.
         val DEFAULT_BUTTON_FOCUS_COLOR = Color.parseColor("#2979FF")
 
+        /// Live badge fill: a warm amber, readable under white text.
+        const val DEFAULT_LIVE_BADGE_COLOR = "#FFA500"
+
         /// Focus-aware button background: a bright fill when focused, a subtle
         /// translucent one otherwise — so D-pad navigation is visible in an overlay
         /// window, where the platform button carries no focus state of its own.
@@ -966,4 +1037,12 @@ internal fun heightForDisplayAspect(targetWidth: Int, width: Int, height: Int, p
     val ratio = if (pixelWidthHeightRatio > 0f) pixelWidthHeightRatio else 1f
     val displayWidth = width * ratio
     return Math.round(targetWidth * height / displayWidth)
+}
+
+/// Corner of the stream area for the live badge; unknown or missing values mean bottom right.
+internal fun liveBadgeGravity(position: String?): Int = when (position) {
+    "top_left" -> Gravity.TOP or Gravity.START
+    "top_right" -> Gravity.TOP or Gravity.END
+    "bottom_left" -> Gravity.BOTTOM or Gravity.START
+    else -> Gravity.BOTTOM or Gravity.END
 }
