@@ -233,7 +233,7 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
                     text = btn.label
                     isFocusable = true
                     isAllCaps = false
-                    setTextColor(Color.WHITE)
+                    setTextColor(parseColorOrDefault(popup.buttonTextColor ?: "#FFFFFF", "#FFFFFF"))
                     // Compact buttons (0.19.0): an explicit buttonSize scales the text and
                     // the padding with it; without it the classic look stays byte-identical.
                     // 14 sp is the platform Button default the classic padding was tuned for.
@@ -249,7 +249,7 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
                         setPadding(36, 16, 36, 16)
                     }
                     stateListAnimator = null   // the platform one would fight our scale
-                    background = buttonBackground()
+                    background = buttonBackground(ButtonStyle.from(popup))
                     setOnClickListener { onButton?.invoke(btn) }
                     setOnFocusChangeListener { v, hasFocus ->
                         val s = if (hasFocus) 1.12f else 1f
@@ -854,15 +854,16 @@ video{width:100%;height:100%;object-fit:contain;background:__BG__}</style></head
         /// Focus-aware button background: a bright fill when focused, a subtle
         /// translucent one otherwise — so D-pad navigation is visible in an overlay
         /// window, where the platform button carries no focus state of its own.
-        fun buttonBackground(): StateListDrawable {
+        /// Every part can be overridden per popup; the defaults are the classic look.
+        fun buttonBackground(style: ButtonStyle = ButtonStyle()): StateListDrawable {
             fun pill(fill: Int, stroke: Int) = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = 12f
+                cornerRadius = style.cornerRadius
                 setColor(fill)
                 setStroke(2, stroke)
             }
-            val focused = pill(DEFAULT_BUTTON_FOCUS_COLOR, Color.WHITE)
-            val normal = pill(Color.parseColor("#33FFFFFF"), Color.parseColor("#66FFFFFF"))
+            val focused = pill(style.focusColor, style.focusBorderColor)
+            val normal = pill(style.color, style.borderColor)
             return StateListDrawable().apply {
                 addState(intArrayOf(android.R.attr.state_focused), focused)
                 addState(intArrayOf(android.R.attr.state_pressed), focused)
@@ -966,4 +967,29 @@ internal fun heightForDisplayAspect(targetWidth: Int, width: Int, height: Int, p
     val ratio = if (pixelWidthHeightRatio > 0f) pixelWidthHeightRatio else 1f
     val displayWidth = width * ratio
     return Math.round(targetWidth * height / displayWidth)
+}
+
+/// Resolved popup-button colors and shape; the defaults reproduce the classic look.
+/// A configured border color applies to both states; otherwise the focused button keeps
+/// its classic white outline and the unfocused one its translucent white.
+data class ButtonStyle(
+    val color: Int = Color.parseColor("#33FFFFFF"),
+    val focusColor: Int = PopupView.DEFAULT_BUTTON_FOCUS_COLOR,
+    val borderColor: Int = Color.parseColor("#66FFFFFF"),
+    val focusBorderColor: Int = Color.WHITE,
+    val cornerRadius: Float = 12f,
+) {
+    companion object {
+        fun from(popup: PopupProps): ButtonStyle {
+            val classic = ButtonStyle()
+            val border = popup.buttonBorderColor?.let { PopupView.parseColorOrDefault(it, "#66FFFFFF") }
+            return ButtonStyle(
+                color = popup.buttonColor?.let { PopupView.parseColorOrDefault(it, "#33FFFFFF") } ?: classic.color,
+                focusColor = popup.buttonFocusColor?.let { PopupView.parseColorOrDefault(it, "#2979FF") } ?: classic.focusColor,
+                borderColor = border ?: classic.borderColor,
+                focusBorderColor = border ?: classic.focusBorderColor,
+                cornerRadius = popup.buttonCornerRadius?.takeIf { it >= 0f } ?: classic.cornerRadius,
+            )
+        }
+    }
 }

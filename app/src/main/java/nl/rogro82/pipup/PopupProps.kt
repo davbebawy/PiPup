@@ -43,6 +43,12 @@ data class PopupProps(
     val soundVolume: Float? = null,       // 0..1; device notification volume when omitted
     // 0.19.0: button text size in sp (padding scales along); null = the classic look
     val buttonSize: Float? = null,
+    // Button style, each null = the classic look. Colors are #RRGGBB or #AARRGGBB.
+    val buttonColor: String? = null,        // fill of an unfocused button
+    val buttonFocusColor: String? = null,   // fill of the focused (or pressed) button
+    val buttonTextColor: String? = null,
+    val buttonBorderColor: String? = null,  // outline, both states
+    val buttonCornerRadius: Float? = null,  // px; 0 = square corners
     // 0.19.1: outer padding of the popup in px (the black margin around content);
     // null = the classic 20 px. 0 gives a near-borderless look.
     val padding: Int? = null,
