@@ -326,7 +326,9 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
                     setMargins(m(10), m(10), m(10), m(6))
                 })
             }
-            if (popup.buttonsInline) {
+            // A media-only popup has no header left (removed above), so inline buttons
+            // fall back to their own row instead of landing in a detached view.
+            if (popup.buttonsInline && header.parent != null) {
                 row.setPadding(0, 0, 0, 0)
                 header.addView(row, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
             } else {

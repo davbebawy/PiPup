@@ -516,6 +516,16 @@ hardware. `/state.lastPopup.media.softwareDecoder` echoes the requested value (`
 { "video": { "uri": "rtsp://cam/sub", "width": 640, "softwareDecoder": true }}
 ```
 
+`height` (since 0.28.0, video only, px, optional): the stream area's height until the first frame. Without it the
+box is 16:9 and then takes the poster's aspect. Set it when the camera's snapshot has a different pixel shape
+than its picture (an NVR serving a 704×480 still of a 4:3 image): the box then keeps this height and the poster
+no longer resizes it. Once the stream paints, the box follows the stream's display aspect (also since 0.28.0:
+anamorphic streams with a non-square pixel aspect are no longer squashed). Contributed by @pelkiegr (#67, #69).
+
+```json
+{ "video": { "uri": "rtsp://nvr/sub", "width": 640, "height": 480, "poster": "http://nvr/snapshot.jpg" }}
+```
+
 
 `dismissScreensaver` (since 0.18.0, default `true`): end an active screensaver / ambient mode before the
 popup is shown, so it is seen on every Android version (some dream layers cover app overlays; Android 12+
@@ -550,6 +560,26 @@ near-borderless look.
 
 `buttonSize` (since 0.19.0, sp): scales the popup buttons' text and padding together. Without it the
 buttons look exactly as before.
+
+Button style (since 0.28.0, each optional; unset = the classic look): `buttonColor` (fill of an unfocused
+button), `buttonFocusColor` (fill of the focused one), `buttonTextColor`, `buttonBorderColor` (outline, both
+states) and `buttonCornerRadius` (px, `0` = square). Colors are `#RRGGBB` or `#AARRGGBB`; a malformed value falls
+back to the classic color. Contributed by @pelkiegr (#70).
+
+Camera popup look (since 0.28.0, each off by default; contributed by @pelkiegr, #71):
+- `liveBadge: true` puts a "Live" pill on the stream area once the **first frame** renders (never on the
+  poster). `liveBadgeColor` (default amber `#FFA500`) and `liveBadgePosition` (`top_left`, `top_right`,
+  `bottom_left`, `bottom_right` (default)). For video, whep and web media.
+- `mediaFullBleed: true` lets the media run edge to edge across the top of the popup, its top corners rounded
+  with the popup's `cornerRadius`; title, message and buttons keep the padding.
+- `buttonsInline: true` puts the buttons at the end of the title/message row instead of on their own row,
+  e.g. a single compact "✕". A popup without title, message or icon keeps its button row.
+
+```json
+{ "title": "Front door", "message": "Motion", "cornerRadius": 24, "mediaFullBleed": true,
+  "liveBadge": true, "buttonsInline": true, "buttons": [{ "id": "close", "label": "✕" }],
+  "media": { "whep": { "uri": "http://go2rtc:1984/api/webrtc?src=doorbell", "width": 640, "height": 360 } } }
+```
 
 `animation` (since 0.19.0, default none): `fade`, `slide_left`, `slide_right`, `slide_top` or
 `slide_bottom`. Plays when the popup is built; an update-in-place of the same popup does not re-animate.
