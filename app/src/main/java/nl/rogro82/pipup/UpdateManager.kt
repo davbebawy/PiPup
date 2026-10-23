@@ -53,7 +53,7 @@ object UpdateManager {
     /// the `whep` media type, sent as `whep_url` from ha-pipup 1.23.0). Bump ONLY when a new app
     /// release adds request fields the integration must know about — part of the release
     /// checklist, not something that tracks GitHub.
-    const val MIN_HA_PIPUP = "1.23.0"
+    const val MIN_HA_PIPUP = "1.28.0"
     private const val INSTALL_ACTION = "nl.rogro82.pipup.INSTALL_RESULT"
     private const val NET_TIMEOUT_MS = 15000
     private const val MAX_REDIRECTS = 5

@@ -111,7 +111,8 @@ data class PopupProps(
         JsonSubTypes.Type(Media.Video::class, name = "video"),
         JsonSubTypes.Type(Media.Image::class, name = "image"),
         JsonSubTypes.Type(Media.Web::class, name = "web"),
-        JsonSubTypes.Type(Media.Whep::class, name = "whep")
+        JsonSubTypes.Type(Media.Whep::class, name = "whep"),
+        JsonSubTypes.Type(Media.Grid::class, name = "grid")
     )
     sealed class Media {
         @JsonIgnoreProperties(ignoreUnknown = true)
@@ -141,6 +142,25 @@ data class PopupProps(
         // `poster` as for web; `transparent` lets letterbox bars show the TV behind.
         data class Whep(val uri: String, val width: Int = 640, val height: Int = 360, val muted: Boolean = true,
                         val poster: String? = null, val transparent: Boolean = false): Media()
+        @JsonIgnoreProperties(ignoreUnknown = true)
+        // grid (0.29.0): a camera wall - up to MAX_GRID_TILES WHEP streams in one popup, one
+        // WebView with a peer connection per tile. `width`/`height` are the whole grid;
+        // `fullscreen` makes it fill the screen (minus the popup padding: give `padding: 0`
+        // for edge to edge). `columns` null = automatic (1, 2, 2, 2, 3, 3, 3, 3, 3 for 1..9
+        // tiles). All tiles must come from the same server as the first one: the page is
+        // loaded with that origin so the SDP POSTs are same-origin (go2rtc sends no CORS
+        // headers by default).
+        data class Grid(val items: List<GridItem> = emptyList(), val columns: Int? = null,
+                        val width: Int = 1280, val height: Int = 720, val gap: Int = 4,
+                        val muted: Boolean = true, val labels: Boolean = true,
+                        val fullscreen: Boolean = false): Media() {
+            /// at most MAX_GRID_TILES, empty URIs dropped
+            val tiles: List<GridItem> get() = items.filter { it.uri.isNotBlank() }.take(MAX_GRID_TILES)
+            val columnCount: Int get() = gridColumns(tiles.size, columns)
+        }
+        @JsonIgnoreProperties(ignoreUnknown = true)
+        // `poster`: still shown in the tile until its stream plays; `label`: caption in the tile
+        data class GridItem(val uri: String = "", val label: String? = null, val poster: String? = null)
         data class Bitmap(val image: android.graphics.Bitmap, val width: Int = DEFAULT_MEDIA_WIDTH): Media()
     }
 
@@ -171,6 +191,7 @@ data class PopupProps(
         const val DEFAULT_BORDER_WIDTH = 4          // a borderColor without a borderWidth
         const val DEFAULT_BORDER_COLOR = "#ffffff"  // a borderWidth without a borderColor
         const val DEFAULT_CORNER_RADIUS = 8f        // whenever a border is drawn
+        const val MAX_GRID_TILES = 9                // grid media: a 3x3 wall at most
 
         val DEFAULT_POSITION: Position = Position.TopRight
 
@@ -181,4 +202,12 @@ data class PopupProps(
             "critical" to (8 to "#F44336")
         )
     }
+}
+
+/// Grid columns for [tiles] tiles: the requested number (clamped to 1..tiles), or the
+/// squarest layout that fills a 16:9 screen - 1, 2, 2, 2, 3, 3, 3, 3, 3 for 1..9 tiles.
+internal fun gridColumns(tiles: Int, requested: Int?): Int {
+    if (tiles <= 1) return 1
+    requested?.let { return it.coerceIn(1, tiles) }
+    return if (tiles <= 4) 2 else 3
 }

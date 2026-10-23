@@ -9,6 +9,19 @@ full story (English and Dutch) and the APK.
 
 ## [Unreleased]
 
+## [v0.29.0] — 2026-10-23 (TV control, camera wall)
+### Added
+- **TV control without adb**: `POST /launch` (an app by package, or a deep link), `POST /key` (media keys;
+  home/back with the accessibility service), `GET|POST /volume` (level, step, mute) and `GET /apps` (what
+  can be launched). `/state` gains `control` and `volume`; volume changes, also from the remote, are
+  pushed as `volume_changed`, and every successful control call as `control`.
+- **Camera wall**: `media.grid` shows up to nine WHEP streams in one popup, with per-tile label and poster,
+  automatic or fixed columns, and `fullscreen`.
+### Changed
+- **No backup or device transfer of app data.** `allowBackup` was on, so the settings — including the
+  push webhook URL and the stable device id — went along into Android backups and onto a new TV.
+- `MIN_HA_PIPUP` 1.28.0 (the integration release that knows the new fields).
+
 ## [v0.28.0] — 2026-10-14 (camera popup look, button style, video height)
 All three contributed by @pelkiegr; each option is off by default, so existing popups are unchanged.
 ### Added
