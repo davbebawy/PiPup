@@ -81,6 +81,20 @@ class PiPupService : Service(), WebServer.Handler {
             }
         }
     }
+    /// 0.29.0: volume changes (remote, POST /volume, another app) are pushed as one
+    /// "volume_changed" event per burst - a held volume key fires this per step.
+    /// VOLUME_CHANGED_ACTION is not public API, but every Android version since 4 sends it
+    /// and a dynamically registered receiver gets it; without it a controller only sees a
+    /// remote-control volume change at its next poll.
+    private val mVolumeReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val stream = intent?.getIntExtra("android.media.EXTRA_VOLUME_STREAM_TYPE", -1) ?: -1
+            if (stream != -1 && stream != android.media.AudioManager.STREAM_MUSIC) return
+            mHandler.removeCallbacks(mVolumePush)
+            mHandler.postDelayed(mVolumePush, VOLUME_PUSH_DEBOUNCE_MS)
+        }
+    }
+    private val mVolumePush = Runnable { emit("volume_changed") }
     /// Permissions as last pushed; a difference is pushed as a "permissions" event.
     @Volatile private var mLastPermissions: Map<String, Any?>? = null
     // Last *received* popup (survives dismiss/expiry) — shown on the status screen and
@@ -141,6 +155,10 @@ class PiPupService : Service(), WebServer.Handler {
         registerReceiver(mDreamReceiver, android.content.IntentFilter().apply {
             addAction(Intent.ACTION_DREAMING_STARTED)
             addAction(Intent.ACTION_DREAMING_STOPPED)
+        })
+        registerReceiver(mVolumeReceiver, android.content.IntentFilter().apply {
+            addAction("android.media.VOLUME_CHANGED_ACTION")
+            addAction("android.media.STREAM_MUTE_CHANGED_ACTION")
         })
 
         // Android < 12: the installer wants an on-screen confirmation. See
@@ -237,6 +255,7 @@ class PiPupService : Service(), WebServer.Handler {
     override fun onDestroy() {
         runCatching { unregisterReceiver(mDreamReceiver) }
         runCatching { unregisterReceiver(mScreenReceiver) }
+        runCatching { unregisterReceiver(mVolumeReceiver) }
         // 2026-10-08: overlay windows, popup timers and queued requests outlived the
         // service, and the update callback kept pointing at it. Each step guarded:
         // onDestroy must never throw.
@@ -1216,6 +1235,14 @@ class PiPupService : Service(), WebServer.Handler {
             "canSleep" to PowerController.canSleep(this),
             "sleepMethod" to PowerController.sleepMethod(this)
         )
+        // 0.29.0: TV control - what POST /launch, /key and /volume can do on this device
+        state["control"] = mapOf(
+            "launch" to true,
+            "keys" to TvControl.availableKeys(),
+            "lastLaunched" to TvControl.lastLaunched,
+            "lastLaunchedSecondsAgo" to TvControl.lastLaunchedSecondsAgo()
+        )
+        state["volume"] = TvControl.volumeState(this)
         state["permissions"] = Permissions.asMap(this)
         state["update"] = mapOf(
             "checksEnabled" to updateChecksEnabled(),
@@ -1321,6 +1348,34 @@ class PiPupService : Service(), WebServer.Handler {
         )
     }
 
+    private fun param(session: NanoHTTPD.IHTTPSession, name: String): String? =
+        session.parameters[name]?.firstOrNull()?.takeIf { it.isNotBlank() }
+
+    private fun jsonResponse(status: NanoHTTPD.Response.Status, body: Any?): NanoHTTPD.Response =
+        newFixedLengthResponse(status, APPLICATION_JSON, Json.writeValueAsString(body))
+
+    /// GET/POST /apps (0.29.0) - launchable apps, for a source list in a controller.
+    private fun appsResponse(): NanoHTTPD.Response =
+        jsonResponse(NanoHTTPD.Response.Status.OK, mapOf("apps" to TvControl.apps(this)))
+
+    /// POST /launch, /key, /volume (0.29.0). Runs on the web-server thread like /power:
+    /// these are binder calls that touch no views, so the caller gets the real outcome.
+    /// 400 = malformed request, 404 = no such app, 501 = this device cannot (fixed volume,
+    /// home/back without the accessibility service).
+    private fun controlResponse(result: TvControl.Result): NanoHTTPD.Response {
+        Log.d(LOG_TAG, "control: ${result.status} ${result.message}")
+        val status = when (result.status) {
+            200 -> NanoHTTPD.Response.Status.OK
+            400 -> NanoHTTPD.Response.Status.BAD_REQUEST
+            403 -> NanoHTTPD.Response.Status.FORBIDDEN
+            404 -> NanoHTTPD.Response.Status.NOT_FOUND
+            501 -> NanoHTTPD.Response.Status.NOT_IMPLEMENTED
+            else -> NanoHTTPD.Response.Status.INTERNAL_ERROR
+        }
+        if (result.ok) emit("control")
+        return jsonResponse(status, mapOf("ok" to result.ok, "message" to result.message) + result.extra)
+    }
+
     /// GET /permissions/diagnose - why a fix button did or did not appear.
     ///
     /// Exists so a bug report can carry facts instead of "it does not work": per
@@ -1424,6 +1479,7 @@ class PiPupService : Service(), WebServer.Handler {
     private fun mediaInfo(p: PopupProps): Map<String, Any?>? = when (val m = p.media) {
         is PopupProps.Media.Web -> mapOf("type" to "web", "width" to m.width, "height" to m.height, "poster" to (m.poster != null))
         is PopupProps.Media.Whep -> mapOf("type" to "whep", "width" to m.width, "height" to m.height, "poster" to (m.poster != null))
+        is PopupProps.Media.Grid -> mapOf("type" to "grid", "tiles" to m.items.size, "columns" to m.columnCount, "fullscreen" to m.fullscreen)
         is PopupProps.Media.Video -> mapOf("type" to "video", "width" to m.width, "poster" to (m.poster != null), "softwareDecoder" to m.softwareDecoder)
         is PopupProps.Media.Image -> mapOf("type" to "image", "width" to m.width)
         is PopupProps.Media.Bitmap -> mapOf("type" to "bitmap", "width" to m.width)
@@ -1434,6 +1490,7 @@ class PiPupService : Service(), WebServer.Handler {
     private fun mediaMuted(p: PopupProps): Boolean? = when (val m = p.media) {
         is PopupProps.Media.Web -> m.muted
         is PopupProps.Media.Whep -> m.muted
+        is PopupProps.Media.Grid -> m.muted
         is PopupProps.Media.Video -> m.muted
         else -> null
     }
@@ -1449,6 +1506,8 @@ class PiPupService : Service(), WebServer.Handler {
                         "/state" -> stateResponse()
                         "/permissions/diagnose" -> diagnoseResponse()
                         "/settings" -> settingsResponse(session)
+                        "/apps" -> appsResponse()
+                        "/volume" -> jsonResponse(NanoHTTPD.Response.Status.OK, TvControl.volumeState(this))
                         else -> InvalidRequest("unknown uri: ${session.uri}")
                     }
                 }
@@ -1499,6 +1558,14 @@ class PiPupService : Service(), WebServer.Handler {
                         }
                         "/settings" -> settingsResponse(session)
                         "/power" -> powerResponse(session)
+                        "/apps" -> appsResponse()
+                        "/launch" -> controlResponse(TvControl.launch(this,
+                            param(session, "package"), param(session, "uri"),
+                            wake = param(session, "wake")?.lowercase() !in setOf("false", "0", "off")))
+                        "/key" -> controlResponse(TvControl.key(this, param(session, "key")))
+                        "/volume" -> controlResponse(TvControl.volume(this,
+                            param(session, "level"), param(session, "step"), param(session, "mute"),
+                            showUi = param(session, "ui")?.lowercase() !in setOf("false", "0", "off")))
                         "/permissions/fix" -> permissionFixResponse(session)
                         "/permissions/diagnose" -> diagnoseResponse()
                         "/cancel" -> {
@@ -1716,6 +1783,8 @@ class PiPupService : Service(), WebServer.Handler {
         const val UPDATE_CHECK_FIRST_DELAY_MS = 120_000L
         const val UPDATE_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000L
         const val WATCHDOG_INTERVAL_MS = 30_000L
+        /// 0.29.0: one volume_changed push per burst of volume steps
+        const val VOLUME_PUSH_DEBOUNCE_MS = 400L
         const val ONGOING_NOTIFICATION_ID = 123
         const val WEBSERVER_START_ATTEMPTS = 3
         const val WEBSERVER_RETRY_DELAY_MS = 500L

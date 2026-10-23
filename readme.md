@@ -16,6 +16,12 @@ streams) on your TV from your home-automation system, for **as long as you want*
 
 ## What this fork adds (compared to [rogro82/PiPup](https://github.com/rogro82/PiPup))
 
+- **TV control** (since 0.29.0) — `POST /launch` starts an app or opens a deep link, `POST /key` sends
+  media keys (play/pause, next, …), `POST /volume` sets or steps the volume and mutes, `GET /apps` lists
+  what can be launched. No adb needed, so this keeps working on TVs where adb debugging drops its grant
+  or a media-player integration's adb route broke. See [TV control](#tv-control).
+- **Camera wall** (since 0.29.0) — `media.grid` shows up to nine WHEP streams in one popup, each with its
+  own label and poster, or full screen as a wall. See [Camera wall](#camera-wall-grid).
 - **WHEP streams** (since 0.25.0) — `media.whep` plays a WebRTC stream straight from a WHEP endpoint
   (go2rtc `/api/webrtc?src=…`), about a second faster and far steadier than go2rtc's player page.
   See [Which stream should a camera popup use?](#which-stream-should-a-camera-popup-use).
@@ -439,6 +445,13 @@ trust boundary the network itself.
 - Since 0.24.0 `/settings` is on the same port. Anyone on the LAN can point the push webhook at
   their own host (and so read every later state change) or change the update source. The update
   source cannot install a foreign app: Android only accepts an update signed with PiPup's own key.
+- Since 0.29.0 the port also takes `/launch`, `/key` and `/volume`: anyone on the LAN can start an app,
+  pause what is playing or change the volume — what a guest with the remote can do, no more. `/launch`
+  only starts apps and links; it cannot install, grant or change anything.
+- Since 0.29.0 nothing of PiPup goes into an Android backup or a device-to-device transfer: settings
+  include the push webhook URL (anyone holding it can post to it) and the stable device id, which would
+  make a new TV show up as the old one. A new or restored TV starts clean and is discovered as a new
+  device.
 
 ## Integrating
 
@@ -492,6 +505,41 @@ to `true` (no audio track is requested); `poster` and `transparent` work as for 
 offer or a dropped connection it retries with backoff (1, 2, 4, then every 8 s).
 `/state.lastPopup.mediaError` holds the last error (for example `HTTP 404` for an unknown stream
 name); with adb, `logcat -s PopupView` shows a timeline per attempt (offer, answer, track, playing).
+
+#### Camera wall (`grid`)
+
+Since 0.29.0. Several WHEP streams side by side in one popup:
+
+```json
+{ "id": "camera_wall", "duration": 0, "position": "center", "padding": 0,
+  "media": { "grid": {
+    "items": [
+      { "uri": "http://go2rtc:1984/api/webrtc?src=doorbell", "label": "Doorbell",
+        "poster": "http://frigate:5000/api/doorbell/latest.jpg" },
+      { "uri": "http://go2rtc:1984/api/webrtc?src=driveway", "label": "Driveway" },
+      { "uri": "http://go2rtc:1984/api/webrtc?src=garden", "label": "Garden" },
+      { "uri": "http://go2rtc:1984/api/webrtc?src=shed", "label": "Shed" }
+    ],
+    "fullscreen": true } } }
+```
+
+| Field | Default | |
+|---|---|---|
+| `items` | — | 1 to 9 tiles: `uri` (WHEP endpoint), optional `label` and `poster` |
+| `columns` | auto | auto = 1, 2, 2, 2, 3, 3, 3, 3, 3 columns for 1..9 tiles |
+| `width` / `height` | 1280 / 720 | size of the whole grid in px |
+| `fullscreen` | `false` | fill the screen (minus the popup `padding`; use `padding: 0` for edge to edge) |
+| `gap` | 4 | px between tiles |
+| `labels` | `true` | show the captions |
+| `muted` | `true` | `false` requests audio from every tile |
+
+Each tile is its own WebRTC connection with the same retry as `whep`, so a camera that is down shows its
+poster (or black) while the rest play. A tile's poster stays until that tile plays. `/state.lastPopup`
+reports `firstFrameMs` for the first tile that plays, and `mediaError` names the tile by its label.
+**All tiles must come from the same server as the first one** — the page is loaded with that origin so
+the SDP offers are same-origin, and go2rtc sends no CORS headers by default. Every tile is decoded on
+the TV, so a wall of main streams can be more than a small streaming stick manages: point the tiles at
+the cameras' substreams.
 
 `poster` (since 0.17.0, video and web; whep since 0.25.0): URL of a still image shown over the stream area until the
 stream renders its first frame, then faded out. Use a camera snapshot (e.g. Frigate
@@ -819,6 +867,41 @@ purely so `GLOBAL_ACTION_LOCK_SCREEN` can be called, and reads nothing from your
 "power": { "canWake": true, "canSleep": true, "sleepMethod": "device_admin" }
 ```
 
+### TV control
+
+Since 0.29.0. Remote-control actions without adb. Like `/power`, each call answers with what happened:
+`{"ok": true, "message": "…", …}` with HTTP 200, **404** for an app that is not installed, **501** when
+this device cannot do it, 400 for a malformed request.
+
+| Path | Method | Parameters |
+|---|---|---|
+| `/apps` | GET | — answers `{"apps": [{"package", "label", "tv"}]}`, sorted by label (`tv` = has a TV launcher entry) |
+| `/launch` | POST | `package=<name>` and/or `uri=<deep link>`; `wake=false` to leave a sleeping screen off |
+| `/key` | POST | `key=play_pause\|play\|pause\|stop\|next\|previous\|rewind\|fast_forward\|home\|back` |
+| `/volume` | GET / POST | one of `level=0-100`, `step=up\|down`, `mute=on\|off\|toggle`; `ui=false` hides the volume bar |
+
+```
+curl -X POST "http://tv:7979/launch?package=com.netflix.ninja"
+curl -X POST "http://tv:7979/launch?uri=https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+curl -X POST "http://tv:7979/key?key=play_pause"
+curl -X POST "http://tv:7979/volume?level=30"
+```
+
+- **Launch** works on every device where popups work: "display over other apps" also exempts PiPup from
+  Android's background-activity-start rules. A sleeping screen is woken first (unless `wake=false`).
+  With only `uri`, Android picks the app that handles the link; add `package` to force one.
+- **Media keys** go to the app that currently holds the media session (Netflix, YouTube, Spotify,
+  Jellyfin, Kodi, …) — the same path as the play button on a Bluetooth remote. An app without a media
+  session ignores them.
+- **Home and back** need the accessibility service (`install.sh --accessibility`); without it they answer
+  501 and are left out of `/state.control.keys`.
+- **Volume** is the media stream (`STREAM_MUSIC`). On a box whose volume belongs to the TV set or an
+  amplifier over HDMI-CEC, `/state.volume.fixed` is `true`: `level=` then answers 501, while `step` and
+  `mute` are passed on and the platform forwards them over CEC where it can. A volume change, also one
+  made with the remote, is pushed as `volume_changed`.
+- PiPup cannot see which app is in the foreground (that needs usage access, a grant with no screen on a
+  TV). `/state.control.lastLaunched` is only what PiPup itself started.
+
 ### Permission screen
 
 | Property      | Value                                                    |
@@ -949,7 +1032,8 @@ Two more keys:
   change: `popup_shown` (with `shownId`), `popup_replaced` (with `shownId` and
   `replacedId`, both the id that was redrawn), `popup_removed` (with `reason`
   expired / cancelled / button / back / watchdog, and `removedId`), `started`, `screen_on`,
-  `screen_off`, `permissions`, and `settings` right after the webhook is set. A failed POST is
+  `screen_off`, `permissions`, `volume_changed` and `control` (after a launch, key or volume call;
+  since 0.29.0), and `settings` right after the webhook is set. A failed POST is
   retried once after 2 s. Empty turns push off. `/settings` answers only whether one is set: the URL
   is the controller's secret. `/state.push` shows the last push result.
 - `updateSource`: `github:<owner>/<repo>` (default `github:mhoogenbosch/PiPup`), or an `http(s)` folder
@@ -988,6 +1072,9 @@ Returns the current state as JSON:
     { "id": "doorbell", "position": "BottomRight", "duration": 0, "indefinite": true, "elapsed": 42, "media": "video" }
   ],
   "power": { "canWake": true, "canSleep": true, "sleepMethod": "device_admin" },
+  "control": { "launch": true, "keys": ["play_pause", "play", "pause", "stop", "next", "previous",
+               "rewind", "fast_forward"], "lastLaunched": "com.netflix.ninja", "lastLaunchedSecondsAgo": 300 },
+  "volume": { "level": 47, "step": 7, "max": 15, "muted": false, "fixed": false },
   "permissions": {
     "overlay": true, "installPackages": true, "autoStart": null,
     "deviceAdmin": true, "accessibility": false, "complete": true,
@@ -995,6 +1082,9 @@ Returns the current state as JSON:
   }
 }
 ```
+
+Since v0.29.0 `control` lists what [TV control](#tv-control) can do here, and `volume` the media volume
+(`fixed: true` = it belongs to the TV set or amplifier).
 
 Since v0.24.0 `popups` lists every popup on screen in stack order (the last one is on top; `id` is
 `null` for the popup sent without an id). `visible` is true while any popup is up, and `popup` is the

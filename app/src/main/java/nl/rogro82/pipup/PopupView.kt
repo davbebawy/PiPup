@@ -833,6 +833,82 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
         }
     }
 
+    /// Camera wall (0.29.0): up to [PopupProps.MAX_GRID_TILES] WHEP streams in one popup.
+    /// One WebView holds every tile, each with its own recvonly peer connection, the same
+    /// negotiation and back-off as [Whep]; a tile's poster is the native `<video poster>`, so
+    /// it disappears on that tile's own first frame. The popup reports "playing" (first-frame
+    /// time, live badge) on the first tile that plays, and an error with the tile's label.
+    private class Grid(context: Context, popup: PopupProps, val media: PopupProps.Media.Grid): PopupView(context, popup) {
+        private var mWebView: WebView? = null
+
+        init { create() }
+
+        @SuppressLint("SetJavaScriptEnabled")
+        override fun create() {
+            super.create()
+
+            val (w, h) = boxSize()
+            val frame = findViewById<FrameLayout>(R.id.popup_frame)
+            val webView = WebView(context).apply {
+                with(settings) {
+                    javaScriptEnabled = true
+                    mediaPlaybackRequiresUserGesture = false
+                    mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                    allowFileAccess = false
+                    allowContentAccess = false
+                }
+                webChromeClient = object : android.webkit.WebChromeClient() {
+                    override fun onConsoleMessage(msg: android.webkit.ConsoleMessage?): Boolean {
+                        msg?.message()?.let { if (it.startsWith("whep")) Log.i(LOG_TAG, it) }
+                        return true
+                    }
+                    override fun onReceivedTitle(view: WebView?, title: String?) {
+                        if (title == null || !title.startsWith("pipup:")) return
+                        when {
+                            title == "pipup:playing" -> onStreamFirstFrame()
+                            title.startsWith("pipup:error:") -> {
+                                val msg = title.removePrefix("pipup:error:")
+                                Log.w(LOG_TAG, "grid: $msg")
+                                try { onMediaError?.invoke(msg) } catch (_: Throwable) {}
+                            }
+                        }
+                    }
+                }
+                setBackgroundColor(Color.BLACK)
+                val origin = try {
+                    val u = android.net.Uri.parse(media.tiles.first().uri)
+                    "${u.scheme}://${u.encodedAuthority}/"
+                } catch (_: Throwable) { null }
+                loadDataWithBaseURL(origin, gridPage(media), "text/html", "utf-8", null)
+            }
+            mWebView = webView
+            frame.addView(webView, FrameLayout.LayoutParams(w, h).apply { gravity = Gravity.CENTER })
+        }
+
+        /// The grid's pixel size: as given, or the whole screen minus the popup padding.
+        private fun boxSize(): Pair<Int, Int> {
+            if (!media.fullscreen) return media.width to media.height
+            val dm = android.util.DisplayMetrics()
+            @Suppress("DEPRECATION")
+            (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(dm)
+            val pad = if (popup.mediaFullBleed) 0 else (popup.padding ?: 20)
+            return (dm.widthPixels - 2 * pad).coerceAtLeast(1) to (dm.heightPixels - 2 * pad).coerceAtLeast(1)
+        }
+
+        override fun destroy() {
+            super.destroy()
+            try {
+                mWebView?.apply {
+                    // closes every peer connection, so go2rtc drops the consumers at once
+                    evaluateJavascript("window.__pipupStop && window.__pipupStop()", null)
+                    loadUrl("about:blank")
+                    destroy()
+                }
+                mWebView = null
+            } catch (_: Throwable) {}
+        }
+    }
+
     companion object {
         const val LOG_TAG = "PopupView"
 
@@ -843,6 +919,105 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
                 .replace("__URL__", org.json.JSONObject.quote(media.uri))
                 .replace("__MUTED__", if (media.muted) "true" else "false")
                 .replace("__BG__", if (media.transparent) "transparent" else "#000")
+
+        /// The camera-wall page (0.29.0). The tiles go in as one JSON array (JSONArray
+        /// quoting), never spliced raw into the script.
+        fun gridPage(media: PopupProps.Media.Grid): String {
+            val tiles = org.json.JSONArray()
+            media.tiles.forEach { t ->
+                tiles.put(org.json.JSONObject().apply {
+                    put("uri", t.uri)
+                    put("label", if (media.labels) (t.label ?: "") else "")
+                    put("poster", t.poster ?: "")
+                })
+            }
+            val cols = media.columnCount
+            val rows = (media.tiles.size + cols - 1) / cols
+            return GRID_PAGE
+                .replace("__TILES__", tiles.toString())
+                .replace("__MUTED__", if (media.muted) "true" else "false")
+                .replace("__COLS__", cols.toString())
+                .replace("__ROWS__", rows.coerceAtLeast(1).toString())
+                .replace("__GAP__", media.gap.coerceIn(0, 64).toString())
+        }
+
+        /// One recvonly peer connection per tile, each with the [WHEP_PAGE] negotiation and
+        /// its own back-off, so one camera that is down does not hold up the rest.
+        const val GRID_PAGE = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#000}
+#g{display:grid;width:100%;height:100%;box-sizing:border-box;gap:__GAP__px;
+grid-template-columns:repeat(__COLS__,1fr);grid-template-rows:repeat(__ROWS__,1fr)}
+.t{position:relative;overflow:hidden;background:#111;min-width:0;min-height:0}
+.t video{width:100%;height:100%;object-fit:contain;background:#111}
+.t span{position:absolute;left:8px;bottom:6px;padding:2px 8px;border-radius:4px;
+font:500 15px sans-serif;color:#fff;background:rgba(0,0,0,.55)}
+.t span:empty{display:none}</style></head>
+<body><div id="g"></div><script>
+(function(){
+  var TILES = __TILES__, MUTED = __MUTED__, g = document.getElementById('g');
+  var stopped = false, anyPlaying = false, stops = [];
+  var T0 = Date.now(); function lg(m){ console.log('whep grid +' + (Date.now() - T0) + 'ms ' + m); }
+  function title(t){ document.title = 'pipup:' + t; }
+  window.__pipupStop = function(){ stopped = true; stops.forEach(function(f){ try { f(); } catch(e) {} }); };
+  TILES.forEach(function(t, i){
+    var box = document.createElement('div'); box.className = 't';
+    var v = document.createElement('video'); v.autoplay = true; v.playsInline = true; v.muted = MUTED;
+    if (t.poster) v.poster = t.poster;
+    var cap = document.createElement('span'); cap.textContent = t.label || '';
+    box.appendChild(v); box.appendChild(cap); g.appendChild(box);
+    var name = t.label || ('tile ' + (i + 1));
+    var pc = null, attempt = 0, timer = null;
+    function err(m){ title('error:' + (name + ': ' + String(m)).slice(0, 120)); }
+    function close(){ try { if (pc) pc.close(); } catch(e) {} pc = null; }
+    function retry(){
+      if (stopped || timer) return;
+      var wait = Math.min(8000, 1000 * Math.pow(2, attempt++));
+      timer = setTimeout(function(){ timer = null; connect(); }, wait);
+    }
+    stops.push(function(){ if (timer) clearTimeout(timer); close(); });
+    v.addEventListener('playing', function(){
+      attempt = 0; lg(name + ' playing');
+      if (!anyPlaying){ anyPlaying = true; title('playing'); }
+    });
+    function gathered(p){
+      return new Promise(function(res){
+        if (p.iceGatheringState === 'complete') return res();
+        var to = setTimeout(res, 1000);
+        p.addEventListener('icegatheringstatechange', function(){
+          if (p.iceGatheringState === 'complete'){ clearTimeout(to); res(); }
+        });
+      });
+    }
+    function connect(){
+      if (stopped) return;
+      if (!window.RTCPeerConnection){ err('no WebRTC in this WebView'); return; }
+      close();
+      var p = pc = new RTCPeerConnection({ iceServers: [] });
+      p.addTransceiver('video', { direction: 'recvonly' });
+      if (!MUTED) p.addTransceiver('audio', { direction: 'recvonly' });
+      p.ontrack = function(e){
+        if (v.srcObject !== e.streams[0]) v.srcObject = e.streams[0] || new MediaStream([e.track]);
+        var pr = v.play(); if (pr && pr.catch) pr.catch(function(){});
+      };
+      p.onconnectionstatechange = function(){
+        if (p !== pc) return;
+        var s = p.connectionState;
+        if (s === 'failed' || s === 'closed' || s === 'disconnected'){ err('connection ' + s); retry(); }
+      };
+      p.createOffer().then(function(o){ return p.setLocalDescription(o); })
+        .then(function(){ return gathered(p); })
+        .then(function(){
+          return fetch(t.uri, { method: 'POST', headers: { 'Content-Type': 'application/sdp' },
+                                body: p.localDescription.sdp });
+        })
+        .then(function(r){ if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+        .then(function(sdp){ if (p !== pc) return; return p.setRemoteDescription({ type: 'answer', sdp: sdp }); })
+        .catch(function(e){ if (p === pc){ err(e && e.message ? e.message : e); retry(); } });
+    }
+    connect();
+  });
+})();
+</script></body></html>"""
 
         /// Recvonly WebRTC against a WHEP endpoint. No STUN: on the LAN the endpoint's host
         /// candidates are enough, and gathering waits at most 1 s anyway. Retries with backoff
@@ -1027,6 +1202,8 @@ video{width:100%;height:100%;object-fit:contain;background:__BG__}</style></head
             return when (popup.media) {
                 is PopupProps.Media.Web -> Web(context, popup, popup.media)
                 is PopupProps.Media.Whep -> Whep(context, popup, popup.media)
+                is PopupProps.Media.Grid ->
+                    if (popup.media.tiles.isEmpty()) Default(context, popup) else Grid(context, popup, popup.media)
                 is PopupProps.Media.Video -> Video(context, popup, popup.media)
                 is PopupProps.Media.Image -> Image(context, popup, popup.media)
                 is PopupProps.Media.Bitmap -> Bitmap(context, popup, popup.media)

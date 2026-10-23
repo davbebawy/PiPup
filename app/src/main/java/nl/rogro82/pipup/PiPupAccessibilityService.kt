@@ -9,7 +9,8 @@ import android.view.accessibility.AccessibilityEvent
 
 /// Fallback route for turning the screen off, for devices where the device admin
 /// `lockNow()` does not reach standby. An enabled accessibility service may call
-/// `GLOBAL_ACTION_LOCK_SCREEN` (Android 9 / API 28 and up).
+/// `GLOBAL_ACTION_LOCK_SCREEN` (Android 9 / API 28 and up). Since 0.29.0 it also sends
+/// the home and back keys for POST /key.
 ///
 /// It observes nothing: no event types are declared in accessibility_service.xml, so
 /// the service never receives UI content - it exists purely for that one action.
@@ -56,6 +57,17 @@ class PiPupAccessibilityService : AccessibilityService() {
         } catch (ex: Throwable) {
             Log.e(LOG_TAG, "Cannot read accessibility settings: ${ex.message}")
             false
+        }
+
+        /// 0.29.0: home/back for POST /key. Same opt-in as the screen-off fallback.
+        fun globalAction(action: Int): Boolean {
+            val service = instance ?: return false
+            return try {
+                service.performGlobalAction(action)
+            } catch (ex: Throwable) {
+                Log.e(LOG_TAG, "global action $action failed: ${ex.message}")
+                false
+            }
         }
 
         fun lockScreen(): Boolean {

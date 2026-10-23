@@ -37,6 +37,15 @@
         <intent>
             <action android:name="android.app.action.ADD_DEVICE_ADMIN"/>
         </intent>
+        <!-- 0.29.0: GET /apps and POST /launch list and start the installed apps -->
+        <intent>
+            <action android:name="android.intent.action.MAIN"/>
+            <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN"/>
+            <category android:name="android.intent.category.LAUNCHER"/>
+        </intent>
     </queries>
 
     <uses-feature
@@ -49,7 +58,10 @@
             android:required="false"/>
 
     <application
-            android:allowBackup="true"
+            android:allowBackup="false"
+            android:fullBackupContent="false"
+            android:dataExtractionRules="@xml/data_extraction_rules"
+            tools:targetApi="s"
             android:icon="@mipmap/ic_launcher"
             android:label="@string/app_name"
             android:supportsRtl="true"
