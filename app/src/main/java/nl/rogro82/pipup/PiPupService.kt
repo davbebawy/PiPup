@@ -865,6 +865,8 @@ class PiPupService : Service(), WebServer.Handler {
             f
         }
 
+        if (popup.coversScreen) return fullscreenParams(layoutFlags, windowFlags, key)
+
         return WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -989,10 +991,38 @@ class PiPupService : Service(), WebServer.Handler {
         return view
     }
 
-    private fun contentParams() = FrameLayout.LayoutParams(
+    /// 0.29.1 (#73): a window over the whole display. An overlay is otherwise laid out inside
+    /// the system-bar insets, so on a device with a status or navigation bar (an intercom panel,
+    /// a tablet) a "full-screen" popup stopped short of the edges and the app underneath showed
+    /// as strips. MATCH_PARENT plus LAYOUT_IN_SCREEN/NO_LIMITS lets it cover the bars; Android
+    /// 11+ also needs the window to stop fitting the insets, and 9+ to extend into a cutout.
+    /// TV screens have no bars, so there it looks exactly like a centred popup of screen size.
+    private fun fullscreenParams(type: Int, flags: Int, key: String): WindowManager.LayoutParams =
+        WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            type,
+            flags or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                setFitInsetsTypes(0)
+            }
+            title = "pipup-${key.ifEmpty { "popup" }}"
+        }
+
+    /// The popup inside its window: wrapped, and centred when the window covers the screen.
+    private fun contentParams(popup: PopupProps) = FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.WRAP_CONTENT,
         ViewGroup.LayoutParams.WRAP_CONTENT
-    )
+    ).apply { if (popup.coversScreen) gravity = Gravity.CENTER }
 
     /// Returns true when the popup is on screen (or updated in place) and /state reflects
     /// it; false when building it threw. /notify waits for this result before answering.
@@ -1058,7 +1088,7 @@ class PiPupService : Service(), WebServer.Handler {
                 current.expire = null
                 destroyView(current.view)
                 current.window.removeAllViews()
-                current.window.addView(view, contentParams())
+                current.window.addView(view, contentParams(popup))
                 try {
                     wm.updateViewLayout(current.window, params)
                 } catch (ex: Throwable) {
@@ -1088,7 +1118,7 @@ class PiPupService : Service(), WebServer.Handler {
                         return super.dispatchKeyEvent(event)
                     }
                 }
-                window.addView(view, contentParams())
+                window.addView(view, contentParams(popup))
                 // a stacked popup that changes size moves the ones after it
                 window.addOnLayoutChangeListener { _, l, t, r, b, oldL, oldT, oldR, oldB ->
                     if (r - l != oldR - oldL || b - t != oldB - oldT) mHandler.post { relayoutStacks() }
@@ -1291,6 +1321,7 @@ class PiPupService : Service(), WebServer.Handler {
                 "sound" to !last.sound.isNullOrBlank(),
                 "animation" to last.animation,
                 "stack" to last.stackAxis?.name?.lowercase(),
+                "fullscreen" to last.coversScreen,
                 "buttons" to last.buttons.size,
                 // time to first rendered frame (video/web); null while not yet painted or n/a
                 "firstFrameMs" to mLastFirstFrameMs,

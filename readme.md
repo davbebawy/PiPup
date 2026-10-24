@@ -506,6 +506,22 @@ offer or a dropped connection it retries with backoff (1, 2, 4, then every 8 s).
 `/state.lastPopup.mediaError` holds the last error (for example `HTTP 404` for an unknown stream
 name); with adb, `logcat -s PopupView` shows a timeline per attempt (offer, answer, track, playing).
 
+#### Full-screen popups
+
+Since 0.29.1. `"fullscreen": true` on any popup makes its window cover the whole display, status and
+navigation bars included, with the content centred. Without it an overlay is laid out *inside* the
+system bars: on a device that has them (a tablet, an intercom panel) a page sized to the screen stops
+short of the edges and the app underneath shows as strips. TVs have no bars, so there it makes no
+visible difference. For a frameless full-screen page:
+
+```json
+{ "id": "screensaver", "duration": 0, "fullscreen": true, "padding": 0, "borderWidth": 0,
+  "media": { "web": { "uri": "http://ha.local:8123/local/clock.html", "width": 1024, "height": 600 } } }
+```
+
+A full-screen popup never stacks. Touch keeps working for a popup without buttons; note that it then
+also takes every touch away from the app underneath for as long as it is up.
+
 #### Camera wall (`grid`)
 
 Since 0.29.0. Several WHEP streams side by side in one popup:
@@ -528,7 +544,7 @@ Since 0.29.0. Several WHEP streams side by side in one popup:
 | `items` | — | 1 to 9 tiles: `uri` (WHEP endpoint), optional `label` and `poster` |
 | `columns` | auto | auto = 1, 2, 2, 2, 3, 3, 3, 3, 3 columns for 1..9 tiles |
 | `width` / `height` | 1280 / 720 | size of the whole grid in px |
-| `fullscreen` | `false` | fill the screen (minus the popup `padding`; use `padding: 0` for edge to edge) |
+| `fullscreen` | `false` | fill the whole screen, system bars included (minus the popup `padding`; use `padding: 0` for edge to edge) — implies the popup's own `fullscreen` |
 | `gap` | 4 | px between tiles |
 | `labels` | `true` | show the captions |
 | `muted` | `true` | `false` requests audio from every tile |
