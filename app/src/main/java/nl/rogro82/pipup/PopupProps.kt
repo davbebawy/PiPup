@@ -77,8 +77,17 @@ data class PopupProps(
     // overlapping them: "vertical" (away from the top/bottom edge; down from the centre for
     // center_left/right) or "horizontal" (away from the left/right edge; rightwards from the
     // centre for top/bottom_center). null/"none" = the fixed position (classic). Center never stacks.
-    val stack: String? = null
+    val stack: String? = null,
+    // 0.29.1 (#73): the popup window covers the whole display, status and navigation bars
+    // included, instead of being laid out inside them; its content is centred. For a frameless
+    // full-screen page give `padding: 0`, `borderWidth: 0` and media sized to the screen.
+    // Touch keeps working for button-less popups. A grid with `fullscreen` implies this.
+    val fullscreen: Boolean = false
 ) {
+    /// Whole-display window: asked for directly, or implied by a full-screen camera wall.
+    val coversScreen: Boolean
+        get() = fullscreen || (media as? Media.Grid)?.fullscreen == true
+
     val indefinite: Boolean
         get() = duration <= 0
 
@@ -88,7 +97,7 @@ data class PopupProps(
             "vertical" -> StackAxis.Vertical
             "horizontal" -> StackAxis.Horizontal
             else -> null
-        }?.takeIf { position != Position.Center }
+        }?.takeIf { position != Position.Center && !coversScreen }
 
     enum class StackAxis { Vertical, Horizontal }
 

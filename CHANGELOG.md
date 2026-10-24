@@ -9,6 +9,16 @@ full story (English and Dutch) and the APK.
 
 ## [Unreleased]
 
+## [v0.29.1] — 2026-10-24 (full-screen popups)
+### Added
+- **`fullscreen: true`** on any popup (#73): the window covers the whole display, status and navigation
+  bars included, with the content centred. Before, an overlay was laid out inside the system bars, so on
+  a device with bars (an intercom panel, a tablet) a screen-sized page was clipped. Requested by
+  @deekay2153.
+### Fixed
+- A full-screen camera wall (`grid.fullscreen`) uses the same full-display window, so it is no longer
+  clipped by system bars either. A full-screen popup never stacks.
+
 ## [v0.29.0] — 2026-10-23 (TV control, camera wall)
 ### Added
 - **TV control without adb**: `POST /launch` (an app by package, or a deep link), `POST /key` (media keys;
