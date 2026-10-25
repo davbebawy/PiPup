@@ -8,6 +8,10 @@ Every version below has a [GitHub release](https://github.com/mhoogenbosch/PiPup
 full story (English and Dutch) and the APK.
 
 ## [Unreleased]
+### Docs
+- Readme: Android < 12 TVs update silently from Home Assistant now — ha-pipup 1.29.0 installs over ADB
+  itself (also on Home Assistant OS) and 1.30.0 does it automatically at night (#76). `install.sh` stays
+  for the first install and for setups without Home Assistant.
 
 ## [v0.29.2] — 2026-10-25 (full-screen edge to edge)
 ### Fixed
