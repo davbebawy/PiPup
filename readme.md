@@ -144,7 +144,8 @@ streams) on your TV from your home-automation system, for **as long as you want*
   integration's update entity). Android only accepts an APK signed with the same key, so a tampered
   download can never replace the app. On **Android 12+** the self-update is silent; on older devices the
   system shows its install confirmation on the TV, which someone has to accept with the remote (see the
-  limitation below). Grant the install permission once (survives updates, not reinstalls):
+  limitation below) — unless Home Assistant installs over ADB instead: ha-pipup ≥ 1.29.0 can, and
+  ≥ 1.30.0 also does it by itself at night ([Advanced install](https://github.com/mhoogenbosch/ha-pipup#built-in-advanced-install-1290)). Grant the install permission once (survives updates, not reinstalls):
   `adb shell appops set nl.rogro82.pipup REQUEST_INSTALL_PACKAGES allow`
 - WebView media supports JavaScript, DOM storage and unattended (autoplay) playback, and cleartext
   (http) LAN URLs are allowed — required for camera streams from e.g. go2rtc/Frigate.
@@ -260,7 +261,7 @@ text, `/state`, `/notify`, `/cancel`, mDNS discovery, the overlay watchdog, and 
 | **`video_url`** — `rtsp://`, HLS `.m3u8` (incl. `camera_mode: stream`), progressive http (since 0.16.0) | **6.0.1+**, via ExoPlayer rendered in a `TextureView` — composited by the GPU inside the popup, so it also shows **over video the TV is already playing** (verified on a Fire TV with a film running). RTSP uses RTP-over-TCP. Audio only with `muted: false`. Not for DRM content (irrelevant for cameras). On **Android < 8 and Amlogic SoCs** video is decoded in software by default (since 0.17.2) because the vendor decoder froze the HDMI input on release; `softwareDecoder` overrides. |
 | MJPEG camera streams | use **`web_url`** (or the HA integration's `camera_mode: mjpeg`), never `image_url` — `image_url` decodes a single still image and cannot render a multipart MJPEG stream (it shows only the text). For a still, point `image_url` at a snapshot such as Frigate's `/api/<cam>/latest.jpg`. |
 | Screen **off** (`POST /power?state=off`) | any version, after a one-time device-admin **or** accessibility grant (`--power` / `--accessibility`); which route works depends on the device |
-| **Silent** self-update | **12+** only. On older devices the update still works but the system shows an install confirmation the app wakes the screen for and turns into a popup with a button — one press on the remote finishes it (see [the limitation](https://github.com/mhoogenbosch/ha-pipup#the-update-button-is-silent-only-on-android-12)) |
+| **Silent** self-update | **12+** only. On older devices the update still works but the system shows an install confirmation the app wakes the screen for and turns into a popup with a button — one press on the remote finishes it (see [the limitation](https://github.com/mhoogenbosch/ha-pipup#the-update-button-is-silent-only-on-android-12)). Silent on **any** version when ha-pipup ≥ 1.29.0 installs over ADB ([Advanced install](https://github.com/mhoogenbosch/ha-pipup#built-in-advanced-install-1290)) |
 | Restart after a **silent power-restore boot** (`LOCKED_BOOT_COMPLETED`) | **7.0+** (direct boot). On Android 6 there is no direct boot, so a restart relies on the normal `BOOT_COMPLETED` — fine on a TV/projector without a lock screen |
 | `specialUse` foreground-service type | 14+ (cosmetic; older run a normal foreground service) |
 
@@ -308,9 +309,15 @@ started from the background (see below) — there the app has to come up in the 
 > only on Android 12+; on older devices the OS forces an on-screen confirmation for any *app*-initiated
 > install (a platform limit — see [self-update](#what-this-fork-adds-compared-to-rogro82pipup)). A
 > **shell**-initiated `adb install -r`, which is what `install.sh` does, has no confirmation on any
-> Android version. Run it on a schedule (cron, or a Home Assistant `shell_command`) to keep older TVs
-> updated with no interaction — the [ha-pipup readme](https://github.com/mhoogenbosch/ha-pipup#the-update-button-is-silent-only-on-android-12)
-> has a ready-made automation.
+> Android version.
+>
+> **With Home Assistant you no longer need the script for that:** ha-pipup ≥ 1.29.0 does the same
+> install itself, in pure Python, so also on Home Assistant OS (no `adb` binary), and ≥ 1.30.0 can do
+> it automatically inside a quiet window at night. Turn on network debugging on the TV once and choose
+> *Advanced install* in the integration's options — see
+> [Advanced install](https://github.com/mhoogenbosch/ha-pipup#built-in-advanced-install-1290).
+> `install.sh` remains the way for the first install, and for keeping TVs updated without Home
+> Assistant (run it on a schedule).
 
 <details>
 <summary>Doing it by hand</summary>
