@@ -204,6 +204,10 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
         val header = findViewById<LinearLayout>(R.id.popup_header)
         val textcol = findViewById<LinearLayout>(R.id.popup_textcol)
 
+        // 0.29.2 (#73): the frame's 3dp top/bottom padding (popup.xml) left a strip of the
+        // popup background above and below a full-screen page and clipped it by as much
+        if (popup.coversScreen) frame.setPadding(0, 0, 0, 0)
+
         if(popup.media == null) {
             removeView(frame)
         }

@@ -9,6 +9,13 @@ full story (English and Dutch) and the APK.
 
 ## [Unreleased]
 
+## [v0.29.2] — 2026-10-25 (full-screen edge to edge)
+### Fixed
+- A full-screen popup (`fullscreen: true`) now reaches the top and bottom edge exactly (#73). The media
+  frame kept a fixed 3dp padding above and below, so with `padding: 0` and `borderWidth: 0` a strip of
+  the popup background still showed there and the page was clipped by as much. Ordinary popups keep the
+  padding and look the same. Reported by @deekay2153.
+
 ## [v0.29.1] — 2026-10-24 (full-screen popups)
 ### Added
 - **`fullscreen: true`** on any popup (#73): the window covers the whole display, status and navigation
