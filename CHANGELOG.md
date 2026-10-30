@@ -7,43 +7,223 @@ Original app by [rogro82](https://github.com/rogro82/PiPup).
 Every version below has a [GitHub release](https://github.com/mhoogenbosch/PiPup/releases) with the
 full story (English and Dutch) and the APK.
 
-## [v0.24.0] - 2026-09-27 (davbebawy fork: several popups at once)
+## [Unreleased]
+### Docs
+- Readme: Android < 12 TVs update silently from Home Assistant now — ha-pipup 1.29.0 installs over ADB
+  itself (also on Home Assistant OS) and 1.30.0 does it automatically at night (#76). `install.sh` stays
+  for the first install and for setups without Home Assistant.
+
+## [v0.29.2] — 2026-10-25 (full-screen edge to edge)
+### Fixed
+- A full-screen popup (`fullscreen: true`) now reaches the top and bottom edge exactly (#73). The media
+  frame kept a fixed 3dp padding above and below, so with `padding: 0` and `borderWidth: 0` a strip of
+  the popup background still showed there and the page was clipped by as much. Ordinary popups keep the
+  padding and look the same. Reported by @deekay2153.
+
+## [v0.29.1] — 2026-10-24 (full-screen popups)
+### Added
+- **`fullscreen: true`** on any popup (#73): the window covers the whole display, status and navigation
+  bars included, with the content centred. Before, an overlay was laid out inside the system bars, so on
+  a device with bars (an intercom panel, a tablet) a screen-sized page was clipped. Requested by
+  @deekay2153.
+### Fixed
+- A full-screen camera wall (`grid.fullscreen`) uses the same full-display window, so it is no longer
+  clipped by system bars either. A full-screen popup never stacks.
+
+## [v0.29.0] — 2026-10-23 (TV control, camera wall)
+### Added
+- **TV control without adb**: `POST /launch` (an app by package, or a deep link), `POST /key` (media keys;
+  home/back with the accessibility service), `GET|POST /volume` (level, step, mute) and `GET /apps` (what
+  can be launched). `/state` gains `control` and `volume`; volume changes, also from the remote, are
+  pushed as `volume_changed`, and every successful control call as `control`.
+- **Camera wall**: `media.grid` shows up to nine WHEP streams in one popup, with per-tile label and poster,
+  automatic or fixed columns, and `fullscreen`.
 ### Changed
-- Each popup id is its own popup window, sized to its content. A popup with a new id opens beside
-  the ones on screen (newest on top) instead of replacing them. Popups without an id share one slot
-  and replace each other, as before. No limit on the count.
-- Same id with new content redraws in place and keeps its place in the stack; `bringToFront: true`
-  opens it on top instead.
+- **No backup or device transfer of app data.** `allowBackup` was on, so the settings — including the
+  push webhook URL and the stable device id — went along into Android backups and onto a new TV.
+- `MIN_HA_PIPUP` 1.28.0 (the integration release that knows the new fields).
+
+## [v0.28.0] — 2026-10-14 (camera popup look, button style, video height)
+All three contributed by @pelkiegr; each option is off by default, so existing popups are unchanged.
+### Added
+- **Camera popup look** (#71): `liveBadge` (a "Live" pill shown on the first rendered frame, with
+  `liveBadgeColor`/`liveBadgePosition`), `mediaFullBleed` (media edge to edge across the top, top corners
+  rounded with the popup) and `buttonsInline` (buttons at the end of the title/message row).
+- **Button style** (#70): `buttonColor`, `buttonFocusColor`, `buttonTextColor`, `buttonBorderColor`,
+  `buttonCornerRadius`. Malformed colors fall back to the classic look.
+- **`media.video.height`** (#69): a fixed stream-area height until the first frame, so an anamorphic NVR
+  snapshot no longer makes the box jump from poster to stream.
+### Fixed
+- `buttonsInline` on a popup without title, message or icon put the buttons into the removed header row,
+  so they never showed; they now keep their own row.
+
+## [v0.27.0] — 2026-10-14 (popup stacking)
+### Added
+- **Popup stacking: `stack: "vertical"` or `"horizontal"`** (#64). A popup lines up with the other
+  stacking popups at the same position instead of drawing over them. Vertical moves away from the
+  top/bottom edge, horizontal away from the left/right edge; on a centred axis the stack continues
+  downwards or to the right. The first popup keeps the classic place, the next ones follow with a
+  12 px gap. The stack closes up when a popup goes away and is laid out again when one changes size
+  (a video popup growing on its first frame). Opt-in per popup; `center` never stacks. `/state`
+  echoes it as `lastPopup.stack`. Requested by @bboykaos.
+### Fixed
+- **Video popups keep the stream's display aspect** (#67). The box was sized from the stored
+  width/height and ignored the pixel aspect ratio, so anamorphic NVR substreams (e.g. 640×360 meant
+  as 4:3) showed squashed. Square-pixel streams are unchanged. Contributed by @pelkiegr.
+### Docs
+- Readme: "Keep the camera's keyframes under the TV's UDP buffer" — WebRTC keyframes above ~220 KB
+  never decode on a box with a 256 KB `rmem_max` (Nokia 8010): the poster stays. How to measure (ffprobe
+  `pkt_size` of key frames), what was measured, and that halving the bitrate does not halve the keyframe.
+
+## [v0.26.1] — 2026-10-11 (install confirmation from the foreground)
+### Fixed
+- **The install confirmation is launched from a foreground Activity, with every popup off the
+  screen first** (#41). On a Xiaomi projector (Android 6, MIUI installer) the system cancelled the
+  confirmation before it drew anything — `INSTALL_CANCELED_BY_USER`, a MIUI error — and on a TCL
+  (Android 11) it used to flash and vanish. Both times the dialog was started from a service or
+  receiver while PiPup's own "Installing…" overlay was still up: MIUI refuses installs while a
+  floating window is shown, and stock Android's installer ignores taps under one. Now the service
+  takes every PiPup popup down, opens `MainActivity` with `ACTION_CONFIRM_INSTALL`, and the
+  Activity starts the dialog with `startActivityForResult` and closes again when it returns. The
+  direct start from the service remains as fallback; the confirm popup with a button only when
+  even that fails. `POST /update` while a confirmation is pending relaunches it the same way.
+- **A failed install is said on the TV**: "PiPup update failed" with the installer's message, for
+  20 s, instead of only `update.error` in `/state`.
+### Added
+- `/state.update.confirmLaunch` (`trigger` auto/button/post-update, `path` foreground-activity/service,
+  `activityResult`, `result`, `resultMs`): whether the dialog was refused by the system (verdict
+  within milliseconds) or cancelled by a person (seconds), diagnosable without adb.
+
+## [v0.26.0] — 2026-10-11 (center left / center right)
+### Added
+- **`position` 7 = CenterLeft and 8 = CenterRight** (#62, requested by @bboykaos) — the 3×3 grid is
+  complete. Vertically centred, 20 px from the side edge, so `TopRight`/`CenterRight`/`BottomRight`
+  stack along one side without overlapping when several popups are shown at once. Appended after the
+  existing values; nothing moves for existing callers. The matching ha-pipup release is 1.25.0.
+- A unit test pins the `Position` declaration order, which is the wire contract for the integer
+  `position` (multipart, JSON and the ha-pipup integration all map by ordinal).
+### Docs
+- `/cancel`: the v0.24.0 change for a cancel without id is now marked breaking, in the readme and the
+  v0.24.0 entry below.
+
+## [v0.25.2] — 2026-10-10 (self-update on Android 6, for real)
+### Fixed
+- **Bundled ISRG Root X1 now loads on Android 6** (#41). The certificate was stored as a raw-string
+  PEM with a leading newline; Android 6's Conscrypt only parses a stream as PEM when its first byte is
+  `-`, so it tried DER and failed with `asn1_check_tlen:WRONG_TAG`. The updater silently fell back to
+  the system trust store (`update.tlsFactory: platform-default: …`), which on Android < 7.1.1 lacks
+  ISRG Root X1 — so neither 0.19.3 nor 0.21.1's redirect fix could take effect. The PEM is now decoded
+  to DER before it reaches `CertificateFactory`, which every Android version parses.
+  Diagnosed thanks to the `update.tlsFactory` field from 0.21.1 (reported by @bboykaos).
+### Added
+- Unit tests for the bundled root (DER starts with an ASN.1 SEQUENCE, SHA-256 fingerprint matches the
+  published ISRG Root X1, parses as X.509); CI runs `testDebugUnitTest` before building.
+
+## [v0.25.1] — 2026-10-08 (audit fixes)
+### Fixed
+- **Port bind failure no longer leaves the TV offline.** When `:7979` could not be bound after three
+  attempts the service called `stopSelf()`, which `START_STICKY` does not undo. It now keeps running
+  and the 30 s watchdog retries the bind (one attempt per tick, logged) until it succeeds.
+- **Install button keeps the "Installing PiPup vX" popup up** (regression in 0.24.0). The generic
+  button removal was posted right after the in-place redraw and took it down in the same frame; the
+  update popup is no longer removed by its own button. Other buttons are unchanged.
+- **Re-send with a new callback URL updates in place.** `sameContent` no longer compares `callback`
+  (the integration sends a fresh single-use token on every show), so the view and its stream are kept;
+  the button handler already reads the callback from the props on screen. Buttons still count.
+- **Re-send during the exit animation keeps the popup.** A same-content re-send within the 180 ms exit
+  animation was answered 200 and then removed by the animation's end. A per-popup generation counter
+  stops that end action, and the exit animation is cancelled with the popup restored to rest.
+- **bringToFront window failure is reported.** When adding the new window threw, the old popup was
+  already gone but `/state` still listed it. It is now republished and pushed as `popup_removed`
+  (`reason`: `replace_failed`).
+- **Push queue is bounded.** At most 16 pushes wait (oldest dropped, logged once); the 2 s retry is
+  skipped when a newer push is waiting, and a 4xx answer is not retried. Still one thread, in order.
+- **Self-update cleans up after itself.** A failed install abandons its PackageInstaller session, an
+  expired on-screen confirmation abandons the committed session, and a download that ends before its
+  Content-Length fails as `download failed: truncated (x of y bytes)` instead of being committed.
+- **Update refusals are visible.** `installLatest()` now stores every refusal in `update.lastError`
+  ("no download URL", "an update is already running"); `POST /update` and the popup button log the
+  outcome, including "no newer release". The reply is still `update started`.
+- **Update announcement is marked only once shown.** The "update available" popup counted as shown
+  before it was built; a popup that failed to build meant that version was never offered again.
+- **Service stop cleans up.** `onDestroy` removes all popups (`popup_removed`, `reason`:
+  `service_stopped`), clears the popup and request handlers and drops the update callback.
+### Changed
+- **Multipart `/notify` limits.** Bodies above 32 MB are refused before parsing; uploaded images
+  above 32 MP are refused (400), larger images are downsampled so the longer side is at most
+  max(4096 px, 2 × `imageWidth`). Smaller images decode at full size, as before.
+- **WebView hardening.** `web` and `whep` popups set `allowFileAccess` and `allowContentAccess` to
+  false; JavaScript, DOM storage, autoplay and mixed-content settings are unchanged.
+- **Callback URL redacted.** logcat and the `/notify` reply show `callback=<set>` instead of the URL
+  with its single-use token; every other field is echoed as before.
+
+## [v0.25.0] — 2026-10-07 (WHEP: WebRTC without the player page)
+Idea from [lapicidae/PiPup](https://github.com/lapicidae/PiPup); implemented independently.
+### Added
+- **`whep` media**: a WebRTC stream played straight from a WHEP endpoint (go2rtc
+  `/api/webrtc?src=<stream>`). A built-in player page, loaded with the endpoint's origin as base URL
+  (same-origin POST, no CORS), sends one recvonly SDP offer and plays the answer; "playing" comes from
+  its own `<video>`, so the poster hands over exactly on the first frame. Fields `uri`, `width`,
+  `height`, `muted` (default `true`: no audio track requested), `poster`, `transparent`. Retries with
+  backoff (1, 2, 4, then every 8 s) on a failed offer or a dropped connection. The endpoint URL is
+  inserted as a JSON string literal, never spliced raw into the script.
+- `/state.lastPopup.mediaError`: the last stream error of the newest popup (whep), null while fine.
+- WHEP timeline in logcat (`PopupView`): offer, gathering, answer, ICE, track, playing, in ms.
+### Measured
+- Fire TV AFTKA (Android 9), doorbell main stream, 6 alternating runs: go2rtc `stream.html` average
+  3423 ms (1977–6635), **whep 2343 ms (2207–2536)**, Frigate MJPEG 906 ms. WHEP itself is done after
+  ~350 ms; the rest is the camera's keyframe interval.
+### Changed
+- `MIN_HA_PIPUP` raised to 1.23.0 (`whep_url`).
+
+## [v0.24.0] — 2026-10-07 (several popups at once, push, see-through popups)
+Built by [David Bebawy (@davbebawy)](https://github.com/davbebawy) in his fork and adopted here with
+his commits and authorship intact.
+### Changed
+- **Several popups at once.** Each popup `id` is its own overlay window, sized to its content. A popup
+  with a new id opens beside the ones on screen (newest on top) instead of replacing them. Popups
+  without an id share one slot and replace each other, as before. Same id with new content redraws in
+  place and keeps its place in the stack; `bringToFront: true` opens it on top instead. Back removes
+  the focused popup (one with buttons) only, and each popup has its own timer.
 - `/cancel`: `?id=` removes that popup only; no id removes the popup without an id; `?all=true`
-  removes every popup.
-- Back removes the focused popup (one with buttons) only. Each popup has its own timer.
+  removes every popup. **Breaking** *(note added 2026-10-10)*: a `/cancel` without id used to remove
+  whatever was on screen; popups shown with an `id` now stay up unless cancelled with that `id` or
+  `all=true`, and the call still answers `200`.
 ### Added
 - `/state.popups`: every popup on screen in stack order (`id`, `position`, `duration`, `indefinite`,
   `elapsed`, `media`). `visible` and `popup` (the top one) stay for older callers.
-- Pushes carry `shownId` on `popup_shown` and `popup_replaced`.
-
-## [v0.23.0] - 2026-09-27 (davbebawy fork: push instead of poll, update source)
-### Added
-- Push: `POST /settings?webhook=<url>` makes the app POST its `/state` JSON plus `event` on every
-  change: `popup_shown`, `popup_replaced` (`replacedId`), `popup_removed` (`reason`: expired,
-  cancelled, button, back, watchdog; `removedId`), `started`, `screen_on`, `screen_off`,
+- **Push:** `POST /settings?webhook=<url>` makes the app POST its `/state` JSON plus `event` on every
+  change: `popup_shown` / `popup_replaced` (`shownId`, `replacedId`), `popup_removed` (`reason`:
+  expired, cancelled, button, back, watchdog; `removedId`), `started`, `screen_on`, `screen_off`,
   `permissions`, and `settings` right after the webhook is set. One retry after 2 s, then dropped.
-  `/state.push` reports `supported`, whether a webhook is set, and the last push result.
-- Update source: `POST /settings?updateSource=github:<owner>/<repo>` (default
-  `github:davbebawy/PiPup`) or an `http(s)://` folder holding `releases.json` (GitHub's releases list
-  saved as is) with the APKs next to it, so a TV without internet can update from a LAN mirror.
-  `/state.update.source` reports it. Recommended ha-pipup version now comes from `davbebawy/ha-pipup`.
+  `/state.push` reports support and the last result.
+- `opacity` (0..1) on any popup, so live TV shows through; entrance animations fade to it.
+- `transparent: true` on `web` media: the WebView paints no background, so a page with a transparent
+  body floats over the TV picture.
+- `GET`/`POST /settings`: persistent device settings. `updateChecks=false` stops the twice-daily
+  release check on TVs without internet; `updateSource` = `github:<owner>/<repo>` (default
+  `github:mhoogenbosch/PiPup`) or an `http(s)` folder with `releases.json` and the APKs (LAN mirror).
+  `/state.update` reports `checksEnabled` and `source`.
+- `MIN_HA_PIPUP` raised to 1.22.0: the first integration that knows the new fields and push.
+### Kept from this fork
+- Top/bottom center positions (0.22.0) and the self-update progress (0.23.0) carry over to the new
+  per-popup windows.
 
-## [v0.22.0] - 2026-09-27 (see-through popups, update check switch for LAN-only TVs)
+## [v0.23.0] — 2026-10-03 (self-update progress)
 ### Added
-- `opacity` (0..1) on any popup: the whole popup, media included, is drawn at that alpha, so live TV
-  shows through it. Entrance animations fade to this value instead of to 1.
-- `transparent: true` on `web` media: the WebView paints no background of its own (Android's default
-  is white), so a page whose `html`/`body` background is transparent shows the TV picture behind it.
-  Verified on a TCL Google TV (Android 12) over live antenna TV.
-- `GET`/`POST /settings`: persistent device settings. `POST /settings?updateChecks=false` stops the
-  twice-daily GitHub release check on TVs that have no internet on purpose; `/state` reports it as
-  `update.checksEnabled`. `POST /update` still works when asked.
+- `/state.update` reports where a self-update is: **`phase`** (`downloading`, `installing`,
+  `awaiting_confirmation`; `null` when idle) and **`progress`** (0–100 while downloading, from the
+  `Content-Length` of the APK; `null` in the other phases), plus `downloadedBytes` and `totalBytes`.
+  [ha-pipup v1.20.0](https://github.com/mhoogenbosch/ha-pipup/releases/tag/v1.20.0) shows this as the
+  update percentage in Home Assistant. Purely additive: older integrations ignore the new fields.
+
+## [v0.22.0] — 2026-09-30 (top and bottom center positions)
+### Added
+- Two popup positions: **`TopCenter` (5)** and **`BottomCenter` (6)**, centered along the top or bottom
+  edge. The existing position numbers 0–4 are unchanged. Contributed by
+  [@andrewm1205](https://github.com/andrewm1205) in #52; the Home Assistant side is
+  [ha-pipup v1.19.0](https://github.com/mhoogenbosch/ha-pipup/releases/tag/v1.19.0) (`top_center` /
+  `bottom_center`). Older apps reject these numbers, which is why ha-pipup checks the app version first.
 
 ## [v0.21.1] — 2026-09-01 (self-update TLS fix reaches the redirect hop)
 ### Fixed

@@ -46,7 +46,10 @@ class PiPupService : Service(), WebServer.Handler {
         var view: PopupView,
         var props: PopupProps,
         var shownAt: Long,
-        var expire: Runnable? = null
+        var expire: Runnable? = null,
+        /// Bumped on every reschedule and update-in-place (2026-10-08): an exit animation
+        /// only removes the popup when nothing touched it since the animation started.
+        var generation: Int = 0
     )
     /// Every popup on screen, in stack order (last = on top). Main thread only.
     private val mShown = LinkedHashMap<String, Shown>()
@@ -69,7 +72,7 @@ class PiPupService : Service(), WebServer.Handler {
             Log.d(LOG_TAG, "screensaver ${if (mDreaming) "started" else "stopped"}")
         }
     }
-    /// Screen on/off pushes (0.23.0): a controller learns of standby without polling.
+    /// Screen on/off pushes (0.24.0): a controller learns of standby without polling.
     private val mScreenReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
@@ -78,6 +81,20 @@ class PiPupService : Service(), WebServer.Handler {
             }
         }
     }
+    /// 0.29.0: volume changes (remote, POST /volume, another app) are pushed as one
+    /// "volume_changed" event per burst - a held volume key fires this per step.
+    /// VOLUME_CHANGED_ACTION is not public API, but every Android version since 4 sends it
+    /// and a dynamically registered receiver gets it; without it a controller only sees a
+    /// remote-control volume change at its next poll.
+    private val mVolumeReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val stream = intent?.getIntExtra("android.media.EXTRA_VOLUME_STREAM_TYPE", -1) ?: -1
+            if (stream != -1 && stream != android.media.AudioManager.STREAM_MUSIC) return
+            mHandler.removeCallbacks(mVolumePush)
+            mHandler.postDelayed(mVolumePush, VOLUME_PUSH_DEBOUNCE_MS)
+        }
+    }
+    private val mVolumePush = Runnable { emit("volume_changed") }
     /// Permissions as last pushed; a difference is pushed as a "permissions" event.
     @Volatile private var mLastPermissions: Map<String, Any?>? = null
     // Last *received* popup (survives dismiss/expiry) — shown on the status screen and
@@ -86,6 +103,8 @@ class PiPupService : Service(), WebServer.Handler {
     @Volatile private var mLastPopupAt: Long = 0L
     /// ms from view creation to first rendered frame of the last video/web popup; null until known
     @Volatile private var mLastFirstFrameMs: Long? = null
+    /// last stream error of the newest popup (whep, 0.25.0): null while fine
+    @Volatile private var mLastMediaError: String? = null
     private val mPopupsShown = java.util.concurrent.atomic.AtomicLong(0)
     private val mStartedAt: Long = SystemClock.elapsedRealtime()
     private lateinit var mWebServer: WebServer
@@ -117,11 +136,12 @@ class PiPupService : Service(), WebServer.Handler {
         // released yet (low-memory devices restart this service within seconds). An unguarded
         // start() threw straight out of onCreate, leaving a live process with a dead server -
         // which no external "is the process running?" check can tell apart from a healthy one.
+        // 2026-10-08: no stopSelf() when all attempts fail. START_STICKY only restarts a
+        // *killed* process, not a service that stopped itself, so that left the TV offline
+        // until the next reboot. The service stays up and the watchdog retries the bind.
         mWebServer = WebServer(SERVER_PORT, this)
         if (!startWebServer()) {
-            Log.e(LOG_TAG, "Giving up on port $SERVER_PORT; stopping for a clean restart")
-            stopSelf()
-            return
+            Log.e(LOG_TAG, "Port $SERVER_PORT not bound yet; the watchdog retries every ${WATCHDOG_INTERVAL_MS / 1000} s")
         }
 
         loadSettings()
@@ -136,13 +156,21 @@ class PiPupService : Service(), WebServer.Handler {
             addAction(Intent.ACTION_DREAMING_STARTED)
             addAction(Intent.ACTION_DREAMING_STOPPED)
         })
+        registerReceiver(mVolumeReceiver, android.content.IntentFilter().apply {
+            addAction("android.media.VOLUME_CHANGED_ACTION")
+            addAction("android.media.STREAM_MUTE_CHANGED_ACTION")
+        })
 
-        // Android < 12: the installer wants an on-screen confirmation. Launched blind
-        // from the background that dialog flashes and vanishes; announced as a popup
-        // with a button it works, because the button press gives this app a visible
-        // window and an activity started from one keeps focus.
+        // Android < 12: the installer wants an on-screen confirmation. See
+        // launchInstallConfirmation() for why it is launched the way it is (0.26.1, #41).
         UpdateManager.onPendingUserAction = {
-            mHandler.post { showConfirmInstallPopup() }
+            UpdateManager.confirmTrigger = "auto"
+            mHandler.post { launchInstallConfirmation() }
+        }
+        // A failed install used to leave the TV silent; the error already sits in
+        // /state.update.error, now it is also said on screen (0.26.1).
+        UpdateManager.onInstallFailed = { error ->
+            mHandler.post { showInstallFailedPopup(error) }
         }
 
         maybeAnnounceInstalledUpdate()
@@ -200,8 +228,8 @@ class PiPupService : Service(), WebServer.Handler {
         }
     }
 
-    private fun startWebServer(): Boolean {
-        repeat(WEBSERVER_START_ATTEMPTS) { attempt ->
+    private fun startWebServer(attempts: Int = WEBSERVER_START_ATTEMPTS): Boolean {
+        repeat(attempts) { attempt ->
             try {
                 mWebServer.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
                 Log.d(LOG_TAG, "WebServer started on :$SERVER_PORT (attempt ${attempt + 1})")
@@ -212,7 +240,7 @@ class PiPupService : Service(), WebServer.Handler {
                     mWebServer.stop()
                 } catch (_: Throwable) {
                 }
-                if (attempt < WEBSERVER_START_ATTEMPTS - 1) {
+                if (attempt < attempts - 1) {
                     try {
                         Thread.sleep(WEBSERVER_RETRY_DELAY_MS)
                     } catch (_: InterruptedException) {
@@ -227,7 +255,16 @@ class PiPupService : Service(), WebServer.Handler {
     override fun onDestroy() {
         runCatching { unregisterReceiver(mDreamReceiver) }
         runCatching { unregisterReceiver(mScreenReceiver) }
-        SoundPlayer.stop(this)
+        runCatching { unregisterReceiver(mVolumeReceiver) }
+        // 2026-10-08: overlay windows, popup timers and queued requests outlived the
+        // service, and the update callback kept pointing at it. Each step guarded:
+        // onDestroy must never throw.
+        runCatching { removeAllPopups(reason = "service_stopped") }
+        runCatching { mHandler.removeCallbacksAndMessages(null) }
+        runCatching { mRequestHandler.removeCallbacksAndMessages(null) }
+        runCatching { UpdateManager.onPendingUserAction = null }
+        runCatching { UpdateManager.onInstallFailed = null }
+        runCatching { SoundPlayer.stop(this) }
         super.onDestroy()
 
         mWatchdogHandler.removeCallbacksAndMessages(null)
@@ -420,8 +457,8 @@ class PiPupService : Service(), WebServer.Handler {
         if (!runCatching { mWebServer.isAlive }.getOrDefault(false)) {
             Log.w(LOG_TAG, "WebServer not running on start command; restarting it")
             if (!startWebServer()) {
-                Log.e(LOG_TAG, "Giving up on port $SERVER_PORT; stopping for a clean restart")
-                stopSelf()
+                // no stopSelf() (2026-10-08): the watchdog keeps retrying the bind
+                Log.e(LOG_TAG, "Port $SERVER_PORT not bound yet; the watchdog retries every ${WATCHDOG_INTERVAL_MS / 1000} s")
             }
         }
         return START_STICKY
@@ -463,11 +500,15 @@ class PiPupService : Service(), WebServer.Handler {
         // state already said it was gone (the "popup stays on TV" reports)
         destroyView(removed.view)
         removeWindow(removed.window)
+        // the popups stacked after this one close the gap
+        if (removed.props.stackAxis != null) relayoutStacks()
         return true
     }
 
-    private fun removeAllPopups(reason: String = "cancelled") {
-        mShown.keys.toList().forEach { removePopup(it, reason) }
+    /// `keepPendingInstall`: taking the confirm popup down must not count as "the user
+    /// never confirmed" when it is the install confirmation itself that needs the screen.
+    private fun removeAllPopups(reason: String = "cancelled", keepPendingInstall: Boolean = false) {
+        mShown.keys.toList().forEach { removePopup(it, reason, byButton = keepPendingInstall) }
     }
 
     private fun destroyView(view: PopupView) {
@@ -516,6 +557,15 @@ class PiPupService : Service(), WebServer.Handler {
                 } catch (ex: Throwable) {
                     Log.e(LOG_TAG, "Watchdog error: ${ex.message}")
                 }
+                // A server that never bound (port still held by a killed process) or
+                // died later is started again here (2026-10-08). One attempt per tick:
+                // this runs on the main thread, and the next tick is 30 s away anyway.
+                runCatching {
+                    if (!mWebServer.isAlive) {
+                        Log.w(LOG_TAG, "Watchdog: WebServer not running, retrying bind on :$SERVER_PORT")
+                        startWebServer(attempts = 1)
+                    }
+                }
                 // local check only (no network): a permission lost by a reinstall or
                 // revoked by the system is pushed as soon as it is seen
                 runCatching { checkPermissionsChanged() }
@@ -531,7 +581,7 @@ class PiPupService : Service(), WebServer.Handler {
     private fun startUpdateChecker() {
         mWatchdogHandler.postDelayed(object : Runnable {
             override fun run() {
-                // LAN-only TVs (no route to GitHub) switch this off via /settings (0.22.0).
+                // LAN-only TVs (no route to GitHub) switch this off via /settings (0.24.0).
                 if (updateChecksEnabled()) Thread {
                     if (UpdateManager.check() && UpdateManager.updateAvailable) {
                         maybeAnnounceUpdate()
@@ -554,9 +604,9 @@ class PiPupService : Service(), WebServer.Handler {
 
     /// GET/POST /settings: persistent device settings, POSTed as query parameters,
     /// e.g. `POST /settings?updateChecks=false`; both methods answer the current values.
-    /// `updateChecks` (0.22.0, true/false): the twice-daily release check.
-    /// `webhook` (0.23.0): URL that receives every state change (see [Pusher]).
-    /// `updateSource` (0.23.0): where releases come from (see [UpdateManager.source]).
+    /// `updateChecks` (0.24.0, true/false): the twice-daily release check.
+    /// `webhook` (0.24.0): URL that receives every state change (see [Pusher]).
+    /// `updateSource` (0.24.0): where releases come from (see [UpdateManager.source]).
     private fun settingsResponse(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
         if (session.method == NanoHTTPD.Method.POST) {
             session.parameters["updateChecks"]?.firstOrNull()?.let { v ->
@@ -567,14 +617,14 @@ class PiPupService : Service(), WebServer.Handler {
                 }
                 prefs().edit().putBoolean(PREF_UPDATE_CHECKS, on).apply()
             }
-            // webhook (0.23.0): http(s) URL to push state changes to; empty = push off
+            // webhook (0.24.0): http(s) URL to push state changes to; empty = push off
             session.parameters["webhook"]?.firstOrNull()?.let { v ->
                 if (v.isNotEmpty() && !(v.startsWith("http://") || v.startsWith("https://"))) {
                     return InvalidRequest("webhook must be an http(s) URL or empty")
                 }
                 prefs().edit().putString(PREF_WEBHOOK, v.ifEmpty { null }).apply()
             }
-            // updateSource (0.23.0): github:<owner>/<repo>, or an http(s) folder URL
+            // updateSource (0.24.0): github:<owner>/<repo>, or an http(s) folder URL
             // holding releases.json and the APKs; empty = back to the default
             session.parameters["updateSource"]?.firstOrNull()?.let { v ->
                 if (v.isNotEmpty() && !UpdateManager.isValidSource(v)) {
@@ -615,9 +665,69 @@ class PiPupService : Service(), WebServer.Handler {
         )
     }
 
+    /// Launches the system's install confirmation (Android < 12) the way the installer
+    /// expects it (0.26.1, #41). Two things are different from the old blind launch:
+    ///
+    /// 1. Every PiPup popup is taken off the screen first. MIUI's installer refuses an
+    ///    install while a floating window is up (its INSTALL_CANCELED_BY_USER on a Xiaomi
+    ///    projector, Android 6), and stock Android's installer ignores taps under an overlay
+    ///    (filterTouchesWhenObscured) - the likely reason the dialog "flashed and vanished"
+    ///    on a TCL (Android 11) as well.
+    /// 2. The dialog is started from MainActivity with startActivityForResult, so it has a
+    ///    visible foreground caller, and the Activity result lands in
+    ///    /state.update.confirmLaunch next to the installer's own verdict. The direct start
+    ///    from this service remains as fallback when the Activity cannot be started; if even
+    ///    that fails the old confirm popup with a button is offered.
+    private fun launchInstallConfirmation() {
+        val trigger = UpdateManager.confirmTrigger ?: "unknown"
+        val confirm = UpdateManager.pendingConfirm ?: run {
+            Log.w(LOG_TAG, "Install confirmation ($trigger): nothing pending")
+            return
+        }
+        PowerController.wake(this)
+        removeAllPopups(reason = "install_confirm", keepPendingInstall = true)
+        val viaActivity = runCatching {
+            startActivity(
+                Intent(this, MainActivity::class.java)
+                    .setAction(ACTION_CONFIRM_INSTALL)
+                    .addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    )
+            )
+        }.onFailure {
+            Log.e(LOG_TAG, "Cannot start MainActivity for the install confirmation", it)
+        }.isSuccess
+        if (viaActivity) {
+            Log.i(LOG_TAG, "Install confirmation ($trigger): handed to MainActivity")
+            return
+        }
+        runCatching { startActivity(Intent(confirm).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+            .onSuccess { UpdateManager.noteConfirmLaunched("service") }
+            .onFailure {
+                Log.e(LOG_TAG, "Cannot show install prompt", it)
+                UpdateManager.noteConfirmLaunchFailed("service", it.message)
+                showConfirmInstallPopup()
+            }
+    }
+
+    /// "PiPup update failed: <reason>" for 20 s, so a refused install is seen on the TV
+    /// and not only in /state (0.26.1).
+    private fun showInstallFailedPopup(error: String) {
+        createPopup(
+            PopupProps(
+                duration = 20,
+                id = UPDATE_POPUP_ID,
+                position = PopupProps.Position.BottomRight,
+                title = getString(R.string.update_failed_title),
+                message = error
+            )
+        )
+    }
+
     /// Popup with a button that (re)launches the system's install confirmation
-    /// (Android < 12). Repeatable: POST /update while a confirmation is pending shows
-    /// it again instead of answering "already running".
+    /// (Android < 12). Since 0.26.1 only the fallback when the dialog could not be
+    /// started at all; the button goes through launchInstallConfirmation().
     private fun showConfirmInstallPopup() {
         val version = UpdateManager.latestVersion ?: return
         // Wake the screen: the confirmation is worthless on a sleeping TV (the system
@@ -675,9 +785,8 @@ class PiPupService : Service(), WebServer.Handler {
         val power = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (!power.isInteractive || mShownList.isNotEmpty()) return
 
-        prefs.edit().putString(PREF_UPDATE_ANNOUNCED, version).apply()
         mHandler.post {
-            createPopup(
+            val shown = createPopup(
                 PopupProps(
                     duration = 60,
                     id = UPDATE_POPUP_ID,
@@ -687,6 +796,9 @@ class PiPupService : Service(), WebServer.Handler {
                     buttons = listOf(PopupProps.Button("install", getString(R.string.update_install)))
                 )
             )
+            // Marked as announced only once it is actually on screen (2026-10-08): a popup
+            // that failed to build used to count as shown, so the version was never offered.
+            if (shown) prefs.edit().putString(PREF_UPDATE_ANNOUNCED, version).apply()
         }
     }
 
@@ -694,16 +806,20 @@ class PiPupService : Service(), WebServer.Handler {
         entry.expire?.let { mHandler.removeCallbacks(it) }
         entry.expire = null
         // duration <= 0 means: show until /cancel or until replaced
+        entry.generation++
         if (entry.props.indefinite) return
         val view = entry.view
+        val generation = entry.generation
         val expire = Runnable {
             // Natural expiry is the one removal nobody is waiting on, so it may
             // animate (0.19.0); every other path (replace, /cancel, buttons) tears
             // down at once. The identity checks make the animation's end a no-op
-            // when the popup was cancelled or redrawn in the meantime.
+            // when the popup was cancelled or redrawn in the meantime; the generation
+            // check does the same for a same-content re-send during the 180 ms exit.
             if (mShown[entry.key] === entry && entry.view === view) {
                 view.animateOut {
-                    if (mShown[entry.key] === entry && entry.view === view) {
+                    if (mShown[entry.key] === entry && entry.view === view &&
+                        entry.generation == generation) {
                         removePopup(entry.key, reason = "expired")
                     }
                 }
@@ -713,6 +829,10 @@ class PiPupService : Service(), WebServer.Handler {
         mHandler.postDelayed(expire, entry.props.duration * 1000L) // 1000L: an Int*Int product
         // overflows past ~24.8 days and a negative delay removes the popup instantly
     }
+
+    /// [PopupProps] for logcat and the /notify echo: the callback URL (a single-use
+    /// token) replaced by "<set>"; everything else as received (2026-10-08).
+    private fun PopupProps.redacted(): PopupProps = copy(callback = callback?.let { "<set>" })
 
     /// Slot of a popup: its id, or "" for every popup without one (they replace each other).
     private fun keyOf(id: String?): String = id?.takeIf { it.isNotEmpty() } ?: ""
@@ -745,6 +865,8 @@ class PiPupService : Service(), WebServer.Handler {
             f
         }
 
+        if (popup.coversScreen) return fullscreenParams(layoutFlags, windowFlags, key)
+
         return WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -758,12 +880,77 @@ class PiPupService : Service(), WebServer.Handler {
                 PopupProps.Position.BottomRight -> Gravity.BOTTOM or Gravity.END
                 PopupProps.Position.BottomLeft -> Gravity.BOTTOM or Gravity.START
                 PopupProps.Position.Center -> Gravity.CENTER
+                PopupProps.Position.TopCenter -> Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                PopupProps.Position.BottomCenter -> Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                PopupProps.Position.CenterLeft -> Gravity.CENTER_VERTICAL or Gravity.START
+                PopupProps.Position.CenterRight -> Gravity.CENTER_VERTICAL or Gravity.END
             }
-            // the classic 20 px margin from the screen edge (was the full-screen overlay's padding)
+            // the classic 20 px margin from the screen edge (was the full-screen overlay's padding);
+            // with a centred axis x/y are an offset from the centre, so that axis stays 0
             val margin = if (popup.position == PopupProps.Position.Center) 0 else SCREEN_MARGIN_PX
-            x = margin
-            y = margin
+            val centredX = popup.position == PopupProps.Position.TopCenter ||
+                popup.position == PopupProps.Position.BottomCenter
+            val centredY = popup.position == PopupProps.Position.CenterLeft ||
+                popup.position == PopupProps.Position.CenterRight
+            x = if (centredX) 0 else margin
+            y = if (centredY) 0 else margin
             title = "pipup-${key.ifEmpty { "popup" }}"
+        }
+    }
+
+    /// Whether [position] is centred on the stack's own axis (offset measured from the centre).
+    private fun centredOn(position: PopupProps.Position, axis: PopupProps.StackAxis): Boolean =
+        when (axis) {
+            PopupProps.StackAxis.Vertical -> position == PopupProps.Position.CenterLeft ||
+                position == PopupProps.Position.CenterRight
+            PopupProps.StackAxis.Horizontal -> position == PopupProps.Position.TopCenter ||
+                position == PopupProps.Position.BottomCenter
+        }
+
+    private fun Shown.sizeAlong(axis: PopupProps.StackAxis): Int =
+        if (axis == PopupProps.StackAxis.Vertical) window.height else window.width
+
+    /// Stacks (0.27.0, #64) of the popups on screen: per position and axis, in stack order.
+    private fun stackGroups(): Map<Pair<PopupProps.Position, PopupProps.StackAxis>, List<Shown>> =
+        mShown.values.filter { it.props.stackAxis != null }
+            .groupBy { it.props.position to it.props.stackAxis!! }
+
+    /// Puts the offset for [popup] in slot [key] into [params] before its window is added or
+    /// redrawn, so a new popup opens in its place in the stack instead of on top of the
+    /// first one. A size that is not known yet counts as 0; the layout listener corrects it.
+    private fun applyStackOffset(params: WindowManager.LayoutParams, popup: PopupProps, key: String) {
+        val axis = popup.stackAxis ?: return
+        fun sameStack(e: Shown) = e.key != key && e.props.position == popup.position && e.props.stackAxis == axis
+        val others = mShown.values.filter(::sameStack)
+        // a redraw in place keeps its place in the stack; a new window (or bringToFront) goes last
+        val inPlace = mShown[key]?.takeIf { !popup.bringToFront }
+        val index = if (inPlace != null) mShown.values.takeWhile { it.key != key }.count(::sameStack)
+                    else others.size
+        val sizes = others.map { it.sizeAlong(axis) }.toMutableList()
+        sizes.add(index, inPlace?.sizeAlong(axis) ?: 0)
+        val offset = StackLayout.offsets(sizes, centredOn(popup.position, axis), SCREEN_MARGIN_PX, STACK_GAP_PX)[index]
+        if (axis == PopupProps.StackAxis.Vertical) params.y = offset else params.x = offset
+    }
+
+    /// Moves every stacking popup to its place: after a popup is added, redrawn or removed,
+    /// and whenever one changes size (a video popup grows when its first frame arrives).
+    private fun relayoutStacks() {
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        for ((group, entries) in stackGroups()) {
+            val (position, axis) = group
+            val offsets = StackLayout.offsets(entries.map { it.sizeAlong(axis) },
+                centredOn(position, axis), SCREEN_MARGIN_PX, STACK_GAP_PX)
+            entries.forEachIndexed { i, entry ->
+                val lp = entry.window.layoutParams as? WindowManager.LayoutParams ?: return@forEachIndexed
+                val vertical = axis == PopupProps.StackAxis.Vertical
+                if ((if (vertical) lp.y else lp.x) == offsets[i]) return@forEachIndexed
+                if (vertical) lp.y = offsets[i] else lp.x = offsets[i]
+                try {
+                    wm.updateViewLayout(entry.window, lp)
+                } catch (ex: Throwable) {
+                    Log.e(LOG_TAG, "Stack relayout of ${entry.key.ifEmpty { "(no id)" }} failed: ${ex.message}")
+                }
+            }
         }
     }
 
@@ -771,6 +958,7 @@ class PiPupService : Service(), WebServer.Handler {
     private fun buildView(popup: PopupProps, key: String): PopupView {
         val view = PopupView.build(this, popup)
         view.onFirstFrame = { ms -> mLastFirstFrameMs = ms }
+        view.onMediaError = { msg -> mLastMediaError = msg }
         view.onButton = { btn ->
             // Use the props shown now, not this closure's `popup`: an update-in-place
             // reuses the view but can carry a new callback URL.
@@ -778,29 +966,63 @@ class PiPupService : Service(), WebServer.Handler {
             // The app's own update popups are handled locally; they have no
             // callback URL and must not be mistaken for user buttons.
             if (shown.id == UPDATE_POPUP_ID) {
+                // No removal here (2026-10-08): showInstallingPopup() uses the same id and
+                // redraws this popup in place. The generic removal posted after it took the
+                // "Installing..." popup down in the same frame (regression from 0.24.0).
                 mHandler.post { showInstallingPopup() }
-                Thread { UpdateManager.installLatest(this) }.start()
+                Thread {
+                    UpdateManager.installLatest(this)?.let { err ->
+                        // already in /state as update.lastError
+                        Log.w(LOG_TAG, "Update from the popup button not started: $err")
+                    }
+                }.start()
             } else if (shown.id == CONFIRM_POPUP_ID) {
-                // Started from a button press = this app has a visible window,
-                // so the system dialog launches reliably and keeps focus.
-                UpdateManager.pendingConfirm?.let { confirm ->
-                    runCatching { startActivity(confirm) }
-                        .onFailure { Log.e(LOG_TAG, "Cannot show install prompt", it) }
-                }
+                UpdateManager.confirmTrigger = "button"
+                mHandler.post { launchInstallConfirmation() }
             } else {
                 sendButtonCallback(shown, btn)
             }
             // byButton: a confirm-popup dismissed by its own button must keep the
             // pending install alive (the system dialog was just launched).
-            mHandler.post { removePopup(key, reason = "button", byButton = true) }
+            if (shown.id != UPDATE_POPUP_ID) {
+                mHandler.post { removePopup(key, reason = "button", byButton = true) }
+            }
         }
         return view
     }
 
-    private fun contentParams() = FrameLayout.LayoutParams(
+    /// 0.29.1 (#73): a window over the whole display. An overlay is otherwise laid out inside
+    /// the system-bar insets, so on a device with a status or navigation bar (an intercom panel,
+    /// a tablet) a "full-screen" popup stopped short of the edges and the app underneath showed
+    /// as strips. MATCH_PARENT plus LAYOUT_IN_SCREEN/NO_LIMITS lets it cover the bars; Android
+    /// 11+ also needs the window to stop fitting the insets, and 9+ to extend into a cutout.
+    /// TV screens have no bars, so there it looks exactly like a centred popup of screen size.
+    private fun fullscreenParams(type: Int, flags: Int, key: String): WindowManager.LayoutParams =
+        WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            type,
+            flags or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                setFitInsetsTypes(0)
+            }
+            title = "pipup-${key.ifEmpty { "popup" }}"
+        }
+
+    /// The popup inside its window: wrapped, and centred when the window covers the screen.
+    private fun contentParams(popup: PopupProps) = FrameLayout.LayoutParams(
         ViewGroup.LayoutParams.WRAP_CONTENT,
         ViewGroup.LayoutParams.WRAP_CONTENT
-    )
+    ).apply { if (popup.coversScreen) gravity = Gravity.CENTER }
 
     /// Returns true when the popup is on screen (or updated in place) and /state reflects
     /// it; false when building it threw. /notify waits for this result before answering.
@@ -810,13 +1032,17 @@ class PiPupService : Service(), WebServer.Handler {
     /// restarts. Same id, new content: the view is swapped inside its window, which keeps
     /// its place in the stack, unless `bringToFront` asks for a new window on top.
     private fun createPopup(popup: PopupProps): Boolean {
+        // bringToFront drops the old window before the new one is added; if adding then
+        // throws, the catch has to report that popup as gone (2026-10-08)
+        var dropped: Shown? = null
         try {
 
-            Log.d(LOG_TAG, "Create popup: $popup")
+            Log.d(LOG_TAG, "Create popup: ${popup.redacted()}")
 
             mLastPopup = popup
             mLastPopupAt = SystemClock.elapsedRealtime()
             mLastFirstFrameMs = null
+            mLastMediaError = null
 
             val key = keyOf(popup.id)
             val current = mShown[key]
@@ -832,6 +1058,11 @@ class PiPupService : Service(), WebServer.Handler {
                     speak(popup.tts, popup.ttsLanguage)
                 }
                 current.props = popup
+                // A re-send can land inside the exit animation of natural expiry: stop it
+                // and put the view back at rest, and bump the generation so its end action
+                // (should it still fire) no longer removes the popup we just answered 200 for.
+                current.generation++
+                current.view.cancelExit()
                 publishShown()
                 scheduleRemoval(current)
                 return true
@@ -846,6 +1077,7 @@ class PiPupService : Service(), WebServer.Handler {
 
             val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val params = windowParams(popup, key)
+            applyStackOffset(params, popup, key)
             val view = buildView(popup, key)
             val now = SystemClock.elapsedRealtime()
 
@@ -856,7 +1088,7 @@ class PiPupService : Service(), WebServer.Handler {
                 current.expire = null
                 destroyView(current.view)
                 current.window.removeAllViews()
-                current.window.addView(view, contentParams())
+                current.window.addView(view, contentParams(popup))
                 try {
                     wm.updateViewLayout(current.window, params)
                 } catch (ex: Throwable) {
@@ -871,6 +1103,7 @@ class PiPupService : Service(), WebServer.Handler {
                     // bringToFront: drop the old window without a "removed" push; the
                     // "replaced" push below says what happened
                     mShown.remove(key)
+                    dropped = current
                     current.expire?.let { mHandler.removeCallbacks(it) }
                     destroyView(current.view)
                     removeWindow(current.window)
@@ -885,12 +1118,17 @@ class PiPupService : Service(), WebServer.Handler {
                         return super.dispatchKeyEvent(event)
                     }
                 }
-                window.addView(view, contentParams())
+                window.addView(view, contentParams(popup))
+                // a stacked popup that changes size moves the ones after it
+                window.addOnLayoutChangeListener { _, l, t, r, b, oldL, oldT, oldR, oldB ->
+                    if (r - l != oldR - oldL || b - t != oldB - oldT) mHandler.post { relayoutStacks() }
+                }
                 wm.addView(window, params)
                 entry = Shown(key, window, view, popup, now)
                 mShown[key] = entry
             }
             publishShown()
+            relayoutStacks()
             mPopupsShown.incrementAndGet()
 
             if (popup.buttons.isNotEmpty()) {
@@ -915,6 +1153,15 @@ class PiPupService : Service(), WebServer.Handler {
 
         } catch (ex: Throwable) {
             Log.e(LOG_TAG, "Create popup failed: ${ex.message}", ex)
+            dropped?.let { old ->
+                // the old window is already gone; without this /state kept listing it
+                if (mShown[keyOf(old.props.id)] == null) {
+                    runCatching {
+                        publishShown()
+                        emit("popup_removed", mapOf("reason" to "replace_failed", "removedId" to old.props.id))
+                    }
+                }
+            }
             return false
         }
     }
@@ -948,7 +1195,7 @@ class PiPupService : Service(), WebServer.Handler {
         Json.writeValueAsString(buildState())
     )
 
-    /// Push one event (0.23.0): the /state JSON plus `event` and [extra]. Built here,
+    /// Push one event (0.24.0): the /state JSON plus `event` and [extra]. Built here,
     /// on the caller's thread, so the body is the state at the moment of the event.
     private fun emit(event: String, extra: Map<String, Any?> = emptyMap()) {
         if (Pusher.url.isNullOrBlank()) return
@@ -1018,6 +1265,14 @@ class PiPupService : Service(), WebServer.Handler {
             "canSleep" to PowerController.canSleep(this),
             "sleepMethod" to PowerController.sleepMethod(this)
         )
+        // 0.29.0: TV control - what POST /launch, /key and /volume can do on this device
+        state["control"] = mapOf(
+            "launch" to true,
+            "keys" to TvControl.availableKeys(),
+            "lastLaunched" to TvControl.lastLaunched,
+            "lastLaunchedSecondsAgo" to TvControl.lastLaunchedSecondsAgo()
+        )
+        state["volume"] = TvControl.volumeState(this)
         state["permissions"] = Permissions.asMap(this)
         state["update"] = mapOf(
             "checksEnabled" to updateChecksEnabled(),
@@ -1025,6 +1280,12 @@ class PiPupService : Service(), WebServer.Handler {
             "available" to UpdateManager.updateAvailable,
             "latest" to UpdateManager.latestVersion,
             "installing" to UpdateManager.isInstalling,
+            // 0.23.0: downloading / installing / awaiting_confirmation, null when idle
+            "phase" to UpdateManager.phase,
+            // 0.23.0: 0-100 while downloading, null otherwise (or without Content-Length)
+            "progress" to UpdateManager.downloadProgress,
+            "downloadedBytes" to UpdateManager.downloadedBytes,
+            "totalBytes" to UpdateManager.downloadTotalBytes.takeIf { it > 0 },
             // waiting for the on-screen confirmation Android < 12 always demands
             "pendingUserAction" to UpdateManager.pendingUserAction,
             // false on Android < 12: an install cannot complete without a remote press
@@ -1033,7 +1294,10 @@ class PiPupService : Service(), WebServer.Handler {
                 ?.let { (System.currentTimeMillis() - it) / 1000 },
             "error" to UpdateManager.lastError,
             // which trust store updater connections use; "unbuilt" until the first check
-            "tlsFactory" to UpdateManager.tlsFactoryKind
+            "tlsFactory" to UpdateManager.tlsFactoryKind,
+            // 0.26.1 (#41): how the last install confirmation was launched and how it ended
+            // (trigger, path, activityResult, result, resultMs); null until one was launched
+            "confirmLaunch" to UpdateManager.confirmLaunchState()
         )
         state["haPipup"] = mapOf(
             // recommended = the latest ha-pipup release on GitHub, fetched with the
@@ -1056,9 +1320,13 @@ class PiPupService : Service(), WebServer.Handler {
                 "tts" to !last.tts.isNullOrBlank(),
                 "sound" to !last.sound.isNullOrBlank(),
                 "animation" to last.animation,
+                "stack" to last.stackAxis?.name?.lowercase(),
+                "fullscreen" to last.coversScreen,
                 "buttons" to last.buttons.size,
                 // time to first rendered frame (video/web); null while not yet painted or n/a
                 "firstFrameMs" to mLastFirstFrameMs,
+                // whep (0.25.0): why the stream did not (or no longer) play; null when fine
+                "mediaError" to mLastMediaError,
                 "secondsAgo" to ((SystemClock.elapsedRealtime() - mLastPopupAt) / 1000)
             )
         }
@@ -1109,6 +1377,34 @@ class PiPupService : Service(), WebServer.Handler {
             APPLICATION_JSON,
             body
         )
+    }
+
+    private fun param(session: NanoHTTPD.IHTTPSession, name: String): String? =
+        session.parameters[name]?.firstOrNull()?.takeIf { it.isNotBlank() }
+
+    private fun jsonResponse(status: NanoHTTPD.Response.Status, body: Any?): NanoHTTPD.Response =
+        newFixedLengthResponse(status, APPLICATION_JSON, Json.writeValueAsString(body))
+
+    /// GET/POST /apps (0.29.0) - launchable apps, for a source list in a controller.
+    private fun appsResponse(): NanoHTTPD.Response =
+        jsonResponse(NanoHTTPD.Response.Status.OK, mapOf("apps" to TvControl.apps(this)))
+
+    /// POST /launch, /key, /volume (0.29.0). Runs on the web-server thread like /power:
+    /// these are binder calls that touch no views, so the caller gets the real outcome.
+    /// 400 = malformed request, 404 = no such app, 501 = this device cannot (fixed volume,
+    /// home/back without the accessibility service).
+    private fun controlResponse(result: TvControl.Result): NanoHTTPD.Response {
+        Log.d(LOG_TAG, "control: ${result.status} ${result.message}")
+        val status = when (result.status) {
+            200 -> NanoHTTPD.Response.Status.OK
+            400 -> NanoHTTPD.Response.Status.BAD_REQUEST
+            403 -> NanoHTTPD.Response.Status.FORBIDDEN
+            404 -> NanoHTTPD.Response.Status.NOT_FOUND
+            501 -> NanoHTTPD.Response.Status.NOT_IMPLEMENTED
+            else -> NanoHTTPD.Response.Status.INTERNAL_ERROR
+        }
+        if (result.ok) emit("control")
+        return jsonResponse(status, mapOf("ok" to result.ok, "message" to result.message) + result.extra)
     }
 
     /// GET /permissions/diagnose - why a fix button did or did not appear.
@@ -1213,6 +1509,8 @@ class PiPupService : Service(), WebServer.Handler {
     /// Media summary for /state's lastPopup: {type, width, height?} or null.
     private fun mediaInfo(p: PopupProps): Map<String, Any?>? = when (val m = p.media) {
         is PopupProps.Media.Web -> mapOf("type" to "web", "width" to m.width, "height" to m.height, "poster" to (m.poster != null))
+        is PopupProps.Media.Whep -> mapOf("type" to "whep", "width" to m.width, "height" to m.height, "poster" to (m.poster != null))
+        is PopupProps.Media.Grid -> mapOf("type" to "grid", "tiles" to m.items.size, "columns" to m.columnCount, "fullscreen" to m.fullscreen)
         is PopupProps.Media.Video -> mapOf("type" to "video", "width" to m.width, "poster" to (m.poster != null), "softwareDecoder" to m.softwareDecoder)
         is PopupProps.Media.Image -> mapOf("type" to "image", "width" to m.width)
         is PopupProps.Media.Bitmap -> mapOf("type" to "bitmap", "width" to m.width)
@@ -1222,6 +1520,8 @@ class PiPupService : Service(), WebServer.Handler {
     /// Muted flag of the last popup's media; null when the media type has no audio.
     private fun mediaMuted(p: PopupProps): Boolean? = when (val m = p.media) {
         is PopupProps.Media.Web -> m.muted
+        is PopupProps.Media.Whep -> m.muted
+        is PopupProps.Media.Grid -> m.muted
         is PopupProps.Media.Video -> m.muted
         else -> null
     }
@@ -1237,6 +1537,8 @@ class PiPupService : Service(), WebServer.Handler {
                         "/state" -> stateResponse()
                         "/permissions/diagnose" -> diagnoseResponse()
                         "/settings" -> settingsResponse(session)
+                        "/apps" -> appsResponse()
+                        "/volume" -> jsonResponse(NanoHTTPD.Response.Status.OK, TvControl.volumeState(this))
                         else -> InvalidRequest("unknown uri: ${session.uri}")
                     }
                 }
@@ -1250,10 +1552,11 @@ class PiPupService : Service(), WebServer.Handler {
                             // web-server thread; progress is visible in /state.
                             if (UpdateManager.pendingConfirm != null) {
                                 // A previous attempt is waiting for the on-screen
-                                // confirmation (Android < 12): re-offer it instead of
+                                // confirmation (Android < 12): launch it again instead of
                                 // answering "already running".
-                                mHandler.post { showConfirmInstallPopup() }
-                                OK("waiting for on-screen confirmation; popup shown again")
+                                UpdateManager.confirmTrigger = "post-update"
+                                mHandler.post { launchInstallConfirmation() }
+                                OK("waiting for on-screen confirmation; launched again")
                             } else {
                                 Thread {
                                     // Always re-check first. `updateAvailable` compares the
@@ -1267,10 +1570,18 @@ class PiPupService : Service(), WebServer.Handler {
                                     // A failed check (offline, GitHub rate limit) leaves the
                                     // previous cache untouched, so this still falls back to a
                                     // known older release instead of doing nothing.
-                                    UpdateManager.check()
+                                    // The reply below goes out before any of this runs, so
+                                    // the outcome is logged and (for a refusal or failure) left
+                                    // in /state's update.lastError (2026-10-08).
+                                    val checked = UpdateManager.check()
                                     if (UpdateManager.updateAvailable) {
                                         mHandler.post { showInstallingPopup() }
-                                        UpdateManager.installLatest(this@PiPupService)
+                                        UpdateManager.installLatest(this@PiPupService)?.let { err ->
+                                            Log.w(LOG_TAG, "POST /update: install not started: $err")
+                                        }
+                                    } else {
+                                        Log.i(LOG_TAG, "POST /update: no newer release than " +
+                                            "${BuildConfig.VERSION_NAME} (check ${if (checked) "ok" else "failed"})")
                                     }
                                 }.start()
                                 OK("update started")
@@ -1278,6 +1589,14 @@ class PiPupService : Service(), WebServer.Handler {
                         }
                         "/settings" -> settingsResponse(session)
                         "/power" -> powerResponse(session)
+                        "/apps" -> appsResponse()
+                        "/launch" -> controlResponse(TvControl.launch(this,
+                            param(session, "package"), param(session, "uri"),
+                            wake = param(session, "wake")?.lowercase() !in setOf("false", "0", "off")))
+                        "/key" -> controlResponse(TvControl.key(this, param(session, "key")))
+                        "/volume" -> controlResponse(TvControl.volume(this,
+                            param(session, "level"), param(session, "step"), param(session, "mute"),
+                            showUi = param(session, "ui")?.lowercase() !in setOf("false", "0", "off")))
                         "/permissions/fix" -> permissionFixResponse(session)
                         "/permissions/diagnose" -> diagnoseResponse()
                         "/cancel" -> {
@@ -1342,6 +1661,13 @@ class PiPupService : Service(), WebServer.Handler {
                                     }
                                     contentType.startsWith(MULTIPART_FORM_DATA) -> {
 
+                                        // Cap before parsing (2026-10-08): parseBody spools the
+                                        // whole body to disk, and this port is open to the LAN.
+                                        val declaredLength = session.headers["content-length"]?.toLongOrNull()
+                                        if (declaredLength != null && declaredLength > MAX_MULTIPART_BODY_BYTES) {
+                                            throw Exception("body too large ($declaredLength bytes, max $MAX_MULTIPART_BODY_BYTES)")
+                                        }
+
                                         val files = mutableMapOf<String, String>()
                                         session.parseBody(files)
 
@@ -1375,12 +1701,30 @@ class PiPupService : Service(), WebServer.Handler {
 
                                         val media = when(val image = files["image"]) {
                                             is String -> {
+                                                val imageWidth = params["imageWidth"]?.toIntOrNull() ?: PopupProps.DEFAULT_MEDIA_WIDTH
                                                 // use{}: decodeStream does not close its stream, so
                                                 // every snapshot popup leaked one file descriptor
-                                                val bitmap = File(image).absoluteFile.inputStream()
-                                                    .use { BitmapFactory.decodeStream(it) }
+                                                val file = File(image).absoluteFile
+                                                // 2026-10-08: read the dimensions first. A full decode of
+                                                // a huge-dimension image (a few KB of PNG can declare
+                                                // 50000x50000) ran the whole process out of memory.
+                                                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                                                file.inputStream().use { BitmapFactory.decodeStream(it, null, bounds) }
+                                                val w = bounds.outWidth
+                                                val h = bounds.outHeight
+                                                if (w <= 0 || h <= 0) throw Exception("could not decode the uploaded image")
+                                                if (w.toLong() * h > MAX_IMAGE_PIXELS) {
+                                                    throw Exception("image too large (${w}x${h}, max ${MAX_IMAGE_PIXELS / 1_000_000} MP)")
+                                                }
+                                                // downsample by powers of two until the longer side fits;
+                                                // anything up to 4096 px decodes at full size, as before
+                                                val maxSide = maxOf(MAX_IMAGE_SIDE_PX.toLong(), 2L * imageWidth)
+                                                var sample = 1
+                                                while (maxOf(w, h).toLong() / sample > maxSide) sample *= 2
+                                                val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+                                                val bitmap = file.inputStream()
+                                                    .use { BitmapFactory.decodeStream(it, null, opts) }
                                                     ?: throw Exception("could not decode the uploaded image")
-                                                val imageWidth = params["imageWidth"]?.toIntOrNull() ?: PopupProps.DEFAULT_MEDIA_WIDTH
                                                 PopupProps.Media.Bitmap(image = bitmap, width = imageWidth)
                                             }
                                             else -> null
@@ -1415,21 +1759,25 @@ class PiPupService : Service(), WebServer.Handler {
                                             padding = params["padding"]?.toIntOrNull(),
                                             sound = params["sound"],
                                             soundVolume = params["soundVolume"]?.toFloatOrNull(),
-                                            bringToFront = params["bringToFront"]?.toBoolean() ?: false
+                                            bringToFront = params["bringToFront"]?.toBoolean() ?: false,
+                                            stack = params["stack"]
                                         )
                                     }
                                     else -> throw Exception("invalid content-type")
                                 }
 
-                                Log.d(LOG_TAG, "received popup: $popup")
+                                // The callback URL carries a single-use token (2026-10-08):
+                                // keep it out of logcat and the echoed reply.
+                                val redacted = popup.redacted()
+                                Log.d(LOG_TAG, "received popup: $redacted")
 
                                 // Answer only once the popup exists and /state reflects it
                                 // (0.17.1). Waits for the view to be built, not for its media
                                 // to load — an RTSP handshake must not hold the reply.
                                 when (runOnMainSync { createPopup(popup) }) {
-                                    true -> OK("$popup")
+                                    true -> OK("$redacted")
                                     false -> ServerError("popup could not be created (see logcat)")
-                                    null -> OK("accepted; main thread busy, popup still queued: $popup")
+                                    null -> OK("accepted; main thread busy, popup still queued: $redacted")
                                 }
 
 
@@ -1458,17 +1806,25 @@ class PiPupService : Service(), WebServer.Handler {
         const val PREF_UPDATE_SOURCE = "update_source"
         const val UPDATE_POPUP_ID = "pipup-update"
         const val CONFIRM_POPUP_ID = "pipup-update-confirm"
+        /// MainActivity intent action: launch the pending install confirmation (0.26.1).
+        const val ACTION_CONFIRM_INSTALL = "nl.rogro82.pipup.action.CONFIRM_INSTALL"
         const val PREF_LAST_RUN_VERSION = "last_run_version"
         // First check shortly after boot (network is usually up by then), then twice a day.
         // GitHub's anonymous API allows 60 requests/hour per IP; this is nowhere near it.
         const val UPDATE_CHECK_FIRST_DELAY_MS = 120_000L
         const val UPDATE_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000L
         const val WATCHDOG_INTERVAL_MS = 30_000L
+        /// 0.29.0: one volume_changed push per burst of volume steps
+        const val VOLUME_PUSH_DEBOUNCE_MS = 400L
         const val ONGOING_NOTIFICATION_ID = 123
         const val WEBSERVER_START_ATTEMPTS = 3
         const val WEBSERVER_RETRY_DELAY_MS = 500L
         const val TTS_IDLE_TIMEOUT_MS = 60_000L
         const val MAX_JSON_BODY_BYTES = 256 * 1024
+        // multipart /notify (2026-10-08): body cap, and the image limits for the upload
+        const val MAX_MULTIPART_BODY_BYTES = 32L * 1024 * 1024
+        const val MAX_IMAGE_PIXELS = 32_000_000L
+        const val MAX_IMAGE_SIDE_PX = 4096
         const val MULTIPART_FORM_DATA = "multipart/form-data"
         const val APPLICATION_JSON = "application/json"
         // How long /notify and /cancel wait for the main thread before answering anyway.
@@ -1477,6 +1833,8 @@ class PiPupService : Service(), WebServer.Handler {
         const val MAIN_SYNC_TIMEOUT_MS = 2_000L
         // gap between a popup and the screen edge
         const val SCREEN_MARGIN_PX = 20
+        /// space between two stacked popups (0.27.0)
+        const val STACK_GAP_PX = 12
 
         fun OK(message: String? = null): NanoHTTPD.Response = newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "text/plain", message)
         fun InvalidRequest(message: String? = null): NanoHTTPD.Response = newFixedLengthResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "text/plain", "invalid request: $message")

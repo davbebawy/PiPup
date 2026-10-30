@@ -33,15 +33,15 @@ import java.util.concurrent.atomic.AtomicLong
 /// versions always show the system's install confirmation on the TV.
 object UpdateManager {
     private const val LOG_TAG = "PiPupUpdate"
-    /// Where releases come from (0.23.0), set by the service from prefs:
+    /// Where releases come from (0.24.0), set by the service from prefs:
     /// `github:<owner>/<repo>` reads that repo's latest release; an `http(s)://`
     /// folder URL reads `<folder>/releases.json` (GitHub's releases API answer saved
     /// as is, e.g. a LAN mirror kept by Home Assistant) and takes the first release
     /// that is neither draft nor prerelease. Its APK is `<folder>/<asset name>`, so a
     /// TV with no internet can still update.
-    const val DEFAULT_SOURCE = "github:davbebawy/PiPup"
+    const val DEFAULT_SOURCE = "github:mhoogenbosch/PiPup"
     private const val HA_PIPUP_RELEASES_URL =
-        "https://api.github.com/repos/davbebawy/ha-pipup/releases/latest"
+        "https://api.github.com/repos/mhoogenbosch/ha-pipup/releases/latest"
     @Volatile var source: String = DEFAULT_SOURCE
 
     private val GITHUB_SOURCE = Regex("^github:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$")
@@ -49,11 +49,11 @@ object UpdateManager {
     fun isValidSource(value: String): Boolean =
         GITHUB_SOURCE.matches(value) || value.startsWith("http://") || value.startsWith("https://")
 
-    /// Oldest ha-pipup release that can drive EVERY field this app accepts (0.21.0 needs
-    /// the `padding` service field, added in ha-pipup 1.17.1). Bump ONLY when a new app
+    /// Oldest ha-pipup release that can drive EVERY field this app accepts (0.25.0 adds
+    /// the `whep` media type, sent as `whep_url` from ha-pipup 1.23.0). Bump ONLY when a new app
     /// release adds request fields the integration must know about — part of the release
     /// checklist, not something that tracks GitHub.
-    const val MIN_HA_PIPUP = "1.17.1"
+    const val MIN_HA_PIPUP = "1.28.0"
     private const val INSTALL_ACTION = "nl.rogro82.pipup.INSTALL_RESULT"
     private const val NET_TIMEOUT_MS = 15000
     private const val MAX_REDIRECTS = 5
@@ -74,6 +74,16 @@ object UpdateManager {
         private set
     @Volatile var lastError: String? = null
         private set
+    /// Where a running self-update is (0.23.0): "downloading" while the APK streams in,
+    /// "installing" once it is handed to the PackageInstaller. null when idle; /state reports
+    /// "awaiting_confirmation" instead while Android < 12 waits for the remote press.
+    @Volatile private var installPhase: String? = null
+    /// Bytes of the APK received so far, and its size from Content-Length (-1 = unknown).
+    @Volatile var downloadedBytes: Long = 0L
+        private set
+    @Volatile var downloadTotalBytes: Long = -1L
+        private set
+
     /// Which trust store the updater's connections use: "composite" (system + bundled
     /// ISRG Root X1), "platform-default: <why>" when building the composite failed, or
     /// "unbuilt" until the first connection forces the lazy build. Reported in /state
@@ -99,8 +109,81 @@ object UpdateManager {
         private set
 
     /// Set by the service; called (on a background thread) when the installer asks for
-    /// on-screen confirmation, so the service can announce it as a popup.
+    /// on-screen confirmation. Since 0.26.1 the service answers by taking its popups down
+    /// and launching the dialog from a foreground Activity (see [confirmLaunchState]).
     @Volatile var onPendingUserAction: (() -> Unit)? = null
+
+    /// Set by the service; called (on a background thread) with the error text when the
+    /// installer reports a failure, so the TV can show it instead of going quiet (#41).
+    @Volatile var onInstallFailed: ((String) -> Unit)? = null
+
+    // ── Confirmation-launch diagnostics (0.26.1, #41) ───────────────────────────────
+    // On a Xiaomi projector (Android 6, MIUI installer) the confirmation was cancelled by
+    // the system before it drew anything: `INSTALL_CANCELED_BY_USER`. Whether that is the
+    // platform refusing (result within milliseconds) or someone pressing cancel (seconds)
+    // is invisible from the status alone, so /state.update.confirmLaunch records what
+    // triggered the launch, which path it took, the Activity result and the time to the
+    // installer's verdict.
+    @Volatile var confirmTrigger: String? = null
+    @Volatile var confirmLaunchPath: String? = null
+        private set
+    @Volatile private var confirmLaunchedAt: Long = 0L
+    @Volatile var confirmActivityResult: String? = null
+        private set
+    @Volatile var confirmResult: String? = null
+        private set
+    @Volatile var confirmResultMs: Long? = null
+        private set
+
+    fun noteConfirmLaunched(path: String) {
+        confirmLaunchPath = path
+        confirmLaunchedAt = android.os.SystemClock.elapsedRealtime()
+        confirmActivityResult = null
+        confirmResult = "pending"
+        confirmResultMs = null
+    }
+
+    fun noteConfirmLaunchFailed(path: String, why: String?) {
+        confirmLaunchPath = path
+        confirmLaunchedAt = 0L
+        confirmResult = "launch failed: ${why ?: "unknown"}"
+        confirmResultMs = null
+    }
+
+    /// Result of the confirmation Activity itself (RESULT_OK = -1, RESULT_CANCELED = 0);
+    /// the installer's own verdict follows separately through the status receiver.
+    fun noteConfirmActivityResult(resultCode: Int) {
+        val ms = confirmLaunchedAt.takeIf { it != 0L }
+            ?.let { android.os.SystemClock.elapsedRealtime() - it }
+        confirmActivityResult = (if (resultCode == -1) "OK" else "CANCELED($resultCode)") +
+            (ms?.let { " after $it ms" } ?: "")
+    }
+
+    private fun noteConfirmOutcome(outcome: String) {
+        if (confirmLaunchedAt != 0L) {
+            confirmResultMs = android.os.SystemClock.elapsedRealtime() - confirmLaunchedAt
+        }
+        confirmResult = outcome
+    }
+
+    private fun resetConfirmDiagnostics() {
+        confirmLaunchPath = null
+        confirmLaunchedAt = 0L
+        confirmActivityResult = null
+        confirmResult = null
+        confirmResultMs = null
+    }
+
+    /// `null` until a confirmation has been launched in this process.
+    fun confirmLaunchState(): Map<String, Any?>? = confirmLaunchPath?.let {
+        mapOf(
+            "trigger" to confirmTrigger,
+            "path" to it,
+            "activityResult" to confirmActivityResult,
+            "result" to confirmResult,
+            "resultMs" to confirmResultMs
+        )
+    }
 
     fun clearPendingConfirm() {
         pendingConfirm = null
@@ -119,14 +202,46 @@ object UpdateManager {
     /// Give up a stalled attempt (its confirmation popup expired unconfirmed), so
     /// /state stops reporting an install in progress and the update can be retried.
     fun abandonPending() {
+        val id = pendingSessionId
+        val installer = pendingInstaller
+        if (id != -1 && installer != null) {
+            runCatching { installer.abandonSession(id) }
+                .onFailure { Log.w(LOG_TAG, "abandonSession($id) failed: ${it.message}") }
+        }
+        clearPendingSession()
         pendingConfirm = null
         installStartedAt.set(0)
+        resetProgress()
     }
 
     val isInstalling: Boolean
         get() = installStartedAt.get().let {
             it != 0L && android.os.SystemClock.elapsedRealtime() - it < INSTALL_TIMEOUT_MS
         }
+
+    /// Phase reported in /state: null when no install is running.
+    val phase: String?
+        get() = when {
+            !isInstalling -> null
+            pendingConfirm != null -> "awaiting_confirmation"
+            else -> installPhase
+        }
+
+    /// Download progress 0-100 while downloading; null in every other phase, and when the
+    /// server sent no Content-Length (a percentage would then be a guess).
+    val downloadProgress: Int?
+        get() {
+            if (phase != "downloading") return null
+            val total = downloadTotalBytes
+            if (total <= 0) return null
+            return (downloadedBytes * 100 / total).toInt().coerceIn(0, 100)
+        }
+
+    private fun resetProgress() {
+        installPhase = null
+        downloadedBytes = 0L
+        downloadTotalBytes = -1L
+    }
 
     /// True when GitHub advertises a release newer than the running build.
     val updateAvailable: Boolean
@@ -224,8 +339,13 @@ object UpdateManager {
     /// anything in the setup throws, so modern devices can never be worse off.
     private val legacySafeSocketFactory: SSLSocketFactory? by lazy {
         try {
+            // Feed DER bytes, never the PEM text: Android 6's Conscrypt only treats the stream
+            // as PEM when its very FIRST byte is '-', so the raw string's leading newline sent
+            // it down the DER path ("asn1_check_tlen:WRONG_TAG") and the bundled root was
+            // never loaded (#41, seen via update.tlsFactory). DER parses on every version.
+            val der = pemToDer(ISRG_ROOT_X1_PEM) { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }
             val cf = CertificateFactory.getInstance("X.509")
-            val isrg = cf.generateCertificate(ISRG_ROOT_X1_PEM.byteInputStream()) as X509Certificate
+            val isrg = cf.generateCertificate(der.inputStream()) as X509Certificate
 
             fun managerFor(keyStore: KeyStore?): X509TrustManager {
                 val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
@@ -300,18 +420,27 @@ object UpdateManager {
         (conn as? HttpsURLConnection)?.sslSocketFactory = factory
     }
 
+    /// Returns null once the session is committed, else the reason it was not. Every
+    /// non-null result is also stored in [lastError] (2026-10-08), so a refusal is visible
+    /// in /state even when the caller (POST /update, the popup button) drops the value.
     fun installLatest(context: Context): String? {
-        val url = downloadUrl ?: return "no download URL (run a check first)"
+        val url = downloadUrl ?: return "no download URL (run a check first)".also { lastError = it }
         val now = android.os.SystemClock.elapsedRealtime()
         val running = installStartedAt.get()
         if (running != 0L && now - running < INSTALL_TIMEOUT_MS) {
-            return "an update is already running"
+            return "an update is already running".also { lastError = it }
         }
         // idle, or a stale attempt past its deadline: claim (or steal) the slot
         if (!installStartedAt.compareAndSet(running, now)) {
-            return "an update is already running"
+            return "an update is already running".also { lastError = it }
         }
 
+        resetProgress()
+        installPhase = "downloading"
+        // Hoisted out of the try (2026-10-08): a session that is created but never
+        // committed must be abandoned, or its staged APK stays on disk until reboot.
+        var installer: PackageInstaller? = null
+        var sessionId = -1
         return try {
             val conn = openWithRedirects(url, readTimeoutMs = 60000)
             if (conn.responseCode != 200) {
@@ -319,10 +448,13 @@ object UpdateManager {
                     Log.w(LOG_TAG, it)
                     lastError = it   // 0.19.1: synchronous failures were invisible in /state
                     installStartedAt.set(0)
+                    resetProgress()
                 }
             }
+            // Header instead of contentLengthLong: that one needs API 24, minSdk is 23.
+            downloadTotalBytes = conn.getHeaderField("Content-Length")?.toLongOrNull() ?: -1L
 
-            val installer = context.packageManager.packageInstaller
+            installer = context.packageManager.packageInstaller
             val params = PackageInstaller.SessionParams(
                 PackageInstaller.SessionParams.MODE_FULL_INSTALL
             )
@@ -335,25 +467,65 @@ object UpdateManager {
                 )
             }
 
-            val sessionId = installer.createSession(params)
+            sessionId = installer.createSession(params)
             installer.openSession(sessionId).use { session ->
                 session.openWrite("pipup.apk", 0, -1).use { out ->
-                    conn.inputStream.use { it.copyTo(out) }
+                    // Copy by hand instead of copyTo() so /state can report progress (0.23.0).
+                    conn.inputStream.use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            out.write(buffer, 0, n)
+                            downloadedBytes += n
+                        }
+                    }
                     session.fsync(out)
                 }
+                // A connection that drops mid-body ends the stream like a normal EOF, so a
+                // truncated APK would otherwise be committed and fail as "invalid package"
+                // (or worse, be parsed). Only checkable when the server sent a length.
+                val total = downloadTotalBytes
+                if (total > 0 && downloadedBytes != total) {
+                    throw TruncatedDownload("download failed: truncated ($downloadedBytes of $total bytes)")
+                }
+                installPhase = "installing"
                 registerResultReceiver(context)
                 session.commit(pendingIntent(context, sessionId).intentSender)
             }
+            // committed: the installer owns it now; kept so abandonPending() can drop a
+            // session that waits for an on-screen confirmation nobody gives
+            pendingSessionId = sessionId
+            pendingInstaller = installer
             Log.i(LOG_TAG, "Update session $sessionId committed for v$latestVersion")
             lastError = null
             null
         } catch (ex: Throwable) {
+            if (installer != null && sessionId != -1) {
+                runCatching { installer.abandonSession(sessionId) }
+                    .onFailure { Log.w(LOG_TAG, "abandonSession($sessionId) failed: ${it.message}") }
+            }
             installStartedAt.set(0)
-            "install failed: ${ex.message ?: ex.javaClass.simpleName}".also {
+            resetProgress()
+            val msg = if (ex is TruncatedDownload) ex.message!!
+                else "install failed: ${ex.message ?: ex.javaClass.simpleName}"
+            msg.also {
                 Log.e(LOG_TAG, it, ex)
                 lastError = it   // 0.19.1: a download/commit exception now shows in /state
             }
         }
+    }
+
+    private class TruncatedDownload(message: String) : Exception(message)
+
+    /// Session committed and not yet concluded (2026-10-08); -1 = none. Lets
+    /// abandonPending() drop a session stuck on the Android < 12 confirmation.
+    @Volatile private var pendingSessionId: Int = -1
+    @Volatile private var pendingInstaller: PackageInstaller? = null
+
+    private fun clearPendingSession() {
+        pendingSessionId = -1
+        pendingInstaller = null
     }
 
     private fun pendingIntent(context: Context, sessionId: Int): PendingIntent {
@@ -382,30 +554,39 @@ object UpdateManager {
                     )) {
                         PackageInstaller.STATUS_PENDING_USER_ACTION -> {
                             // Pre-Android-12 (and whenever the system insists): the user
-                            // has to confirm on the TV. Launching the dialog blind from
-                            // this receiver made it flash and vanish (TCL, Android 11) -
-                            // so keep the intent and let the service offer it as a popup
-                            // with a button; we still try the direct launch as a bonus.
+                            // has to confirm on the TV. 0.26.1 (#41): no blind launch from
+                            // this receiver any more. Started from here the dialog flashed
+                            // and vanished on a TCL (Android 11), and on a Xiaomi projector
+                            // (Android 6, MIUI installer) the system cancelled it before it
+                            // drew: INSTALL_CANCELED_BY_USER. In both cases this app's own
+                            // overlay was still on screen and the caller had no visible
+                            // window. The service takes every popup down and launches the
+                            // dialog from MainActivity (startActivityForResult) instead.
                             @Suppress("DEPRECATION")
                             val confirm = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
-                            confirm?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             pendingConfirm = confirm
-                            runCatching { ctx.startActivity(confirm) }
-                                .onFailure { Log.e(LOG_TAG, "Cannot show install prompt", it) }
+                            resetConfirmDiagnostics()
                             runCatching { onPendingUserAction?.invoke() }
                             // Keep `installing` set: the flow is still in progress.
                         }
                         PackageInstaller.STATUS_SUCCESS -> {
                             Log.i(LOG_TAG, "Update installed")
+                            noteConfirmOutcome("installed")
+                            clearPendingSession()
                             pendingConfirm = null
                             installStartedAt.set(0)
+                            resetProgress()
                         }
                         else -> {
                             val msg = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
                             lastError = "install status $status: $msg"
                             Log.w(LOG_TAG, lastError!!)
+                            noteConfirmOutcome("failed: status $status: $msg")
+                            clearPendingSession()
                             pendingConfirm = null
                             installStartedAt.set(0)
+                            resetProgress()
+                            runCatching { onInstallFailed?.invoke(lastError!!) }
                         }
                     }
                 }
@@ -431,10 +612,20 @@ object UpdateManager {
         return false
     }
 
+    /// Strip the PEM armour and whitespace and decode the base64 body to DER. The decoder is
+    /// passed in so unit tests (plain JVM, no android.util.Base64) can use java.util.Base64.
+    internal fun pemToDer(pem: String, decode: (String) -> ByteArray): ByteArray =
+        decode(
+            pem.lineSequence()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() && !it.startsWith("-----") }
+                .joinToString("")
+        )
+
     /// ISRG Root X1 (Let's Encrypt), self-signed, valid until 2035-06-04. Public root
     /// certificate, verified against the published SHA-256 fingerprint
     /// 96:BC:EC:06:26:49:76:F3:74:60:77:9A:CF:28:C5:A7:CF:E8:A3:C0:AA:E1:1A:8F:FC:EE:05:C0:BD:DF:08:C6.
-    private const val ISRG_ROOT_X1_PEM = """
+    internal const val ISRG_ROOT_X1_PEM = """
 -----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
 TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh

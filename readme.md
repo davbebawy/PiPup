@@ -7,11 +7,34 @@ streams) on your TV from your home-automation system, for **as long as you want*
 > This repository is a maintained fork of that project — all credit for the original idea and
 > implementation goes to him. The fork modernizes the build (AndroidX, AGP 8, Kotlin 2, targetSdk 34)
 > and adds the features below, aimed at Home Assistant use.
+>
+> Contributors to this fork: [David Bebawy (davbebawy)](https://github.com/davbebawy) built several
+> popups at once, push to a webhook, see-through popups and the configurable update source (0.24.0);
+> [andrewm1205](https://github.com/andrewm1205) added the top/bottom center positions (0.22.0).
 
 ![](graphics/screenshot-1.png)
 
 ## What this fork adds (compared to [rogro82/PiPup](https://github.com/rogro82/PiPup))
 
+- **TV control** (since 0.29.0) — `POST /launch` starts an app or opens a deep link, `POST /key` sends
+  media keys (play/pause, next, …), `POST /volume` sets or steps the volume and mutes, `GET /apps` lists
+  what can be launched. No adb needed, so this keeps working on TVs where adb debugging drops its grant
+  or a media-player integration's adb route broke. See [TV control](#tv-control).
+- **Camera wall** (since 0.29.0) — `media.grid` shows up to nine WHEP streams in one popup, each with its
+  own label and poster, or full screen as a wall. See [Camera wall](#camera-wall-grid).
+- **WHEP streams** (since 0.25.0) — `media.whep` plays a WebRTC stream straight from a WHEP endpoint
+  (go2rtc `/api/webrtc?src=…`), about a second faster and far steadier than go2rtc's player page.
+  See [Which stream should a camera popup use?](#which-stream-should-a-camera-popup-use).
+- **Several popups at once** (since 0.24.0) — each popup `id` is its own window, so a doorbell camera
+  and a waste reminder can stand side by side. `/state.popups` lists them in stack order,
+  `/cancel?all=true` clears the screen. See [Cancelling a popup](#cancelling-a-popup).
+- **Push instead of poll** (since 0.24.0) — `POST /settings?webhook=<url>` makes the app POST its
+  `/state` plus an `event` (`popup_shown`, `popup_removed`, `screen_off`, …) on every change, so a
+  controller knows within milliseconds instead of at its next poll. See [Settings](#settings).
+- **See-through popups** (since 0.24.0) — `opacity` (0..1) on any popup, and `transparent: true` on
+  web media so a page with a transparent body floats over live TV.
+- **Update source and switch** (since 0.24.0) — the release check can be switched off for TVs without
+  internet, or pointed at another GitHub repo or a LAN folder with `releases.json`.
 - **Indefinite popups** — `duration: 0` (or negative) shows a popup until it is cancelled or replaced,
   e.g. show a camera stream for exactly as long as there is motion.
 - **Popup `id` + update-in-place** — re-sending a notify with the same `id` and content only reschedules
@@ -121,7 +144,8 @@ streams) on your TV from your home-automation system, for **as long as you want*
   integration's update entity). Android only accepts an APK signed with the same key, so a tampered
   download can never replace the app. On **Android 12+** the self-update is silent; on older devices the
   system shows its install confirmation on the TV, which someone has to accept with the remote (see the
-  limitation below). Grant the install permission once (survives updates, not reinstalls):
+  limitation below) — unless Home Assistant installs over ADB instead: ha-pipup ≥ 1.29.0 can, and
+  ≥ 1.30.0 also does it by itself at night ([Advanced install](https://github.com/mhoogenbosch/ha-pipup#built-in-advanced-install-1290)). Grant the install permission once (survives updates, not reinstalls):
   `adb shell appops set nl.rogro82.pipup REQUEST_INSTALL_PACKAGES allow`
 - WebView media supports JavaScript, DOM storage and unattended (autoplay) playback, and cleartext
   (http) LAN URLs are allowed — required for camera streams from e.g. go2rtc/Frigate.
@@ -133,34 +157,91 @@ a popup binary sensor and `pipup.show` / `pipup.dismiss` actions (including came
 
 ## Which stream should a camera popup use?
 
-Measured across a mixed fleet (Fire TV, Nokia 8010, TCL Google TV) with go2rtc + Frigate as the
-sources — the trade-off is **start-up time versus how far the picture lags behind reality**:
-
-| Route | Start-up (cold) | Live lag | Notes |
-|---|---|---|---|
-| **WebRTC** (`web_url` → go2rtc `stream.html?src=<cam>&mode=webrtc`) | 3–7 s (up to ~11 s on slow webviews) | **< 0.5 s** | Full frame rate. **Best choice since 0.20.0** — see below. |
-| **RTSP** (`video_url: rtsp://…`) | 4–6 s | ~1 s | ExoPlayer, RTP over TCP; renders over playing video. |
-| **MJPEG** (`web_url` → Frigate `/api/<cam>?fps=5`) | 0.2–0.5 s | 2–3 s | The lag is inherent: camera GOP + Frigate's detect pipeline + the frame sampling. Choppy (detect fps). |
-| **HLS** (`video_url: …m3u8`, `camera_mode: stream`) | 7–12 s | 5–10 s | Avoid for live viewing; fine for non-urgent clips. |
-
-The start-up column stopped mattering with the **poster** (0.17.0): a still of the same camera shows
-instantly and hands over to the stream. What *does* matter is the hand-over moment — and since
-**0.20.0** the poster on a `web_url` popup fades when the page's video **actually plays** (not when
-the page paints), so the slow WebRTC start-up is fully masked while its sub-second live lag is kept.
-Since **0.20.1** that holds with no time limit once the page is seen to contain a `<video>` element
-(measured hand-over: 6.4 s on a Nokia 8010, 10.5 s on a slow TCL webview — the poster covered all of
-it); only a page where no video is ever found falls back to showing the page after 20 s:
+**Short answer: `whep` + `poster`** for anything where "now" matters (doorbell, motion), when you run
+go2rtc (stand-alone or inside Frigate):
 
 ```json
-{ "id": "doorbell", "duration": 0, "media": { "web": {
-  "uri": "http://go2rtc:1984/stream.html?src=doorbell&mode=webrtc",
-  "width": 720, "height": 540, "muted": true,
+{ "id": "doorbell", "duration": 0, "media": { "whep": {
+  "uri": "http://go2rtc:1984/api/webrtc?src=doorbell",
+  "width": 720, "height": 540,
   "poster": "http://frigate:5000/api/doorbell/latest.jpg"
 }}}
 ```
 
-**Recommendation: WebRTC + poster** for anything where "now" matters (doorbell, motion). MJPEG remains
-a fine zero-dependency fallback when go2rtc is not available; RTSP sits in between and needs no web page.
+The poster (a camera snapshot) is on screen at once; the live WebRTC picture takes over on its first
+frame, at full frame rate and well under a second behind reality. Without go2rtc, MJPEG is a fine
+zero-dependency fallback; RTSP sits in between and needs no web page.
+
+The trade-off between the routes is **start-up time versus how far the picture lags behind reality**:
+
+| Route | First live frame | Live lag | Notes |
+|---|---|---|---|
+| **WHEP** (`whep` → go2rtc `/api/webrtc?src=<cam>`, since 0.25.0) | 2.2–2.8 s | **< 0.5 s** | **Recommended.** WebRTC without go2rtc's player page. |
+| WebRTC page (`web` → go2rtc `stream.html?src=<cam>&mode=webrtc`) | 2–7 s (up to ~11 s on slow webviews) | < 0.5 s | Same stream as WHEP, but the page, its player script and websocket signalling come first. Use only on an app older than 0.25.0. |
+| RTSP (`video` → `rtsp://…`) | 4–6 s | ~1 s | ExoPlayer, RTP over TCP; renders over playing video. |
+| MJPEG (`web` → Frigate `/api/<cam>?fps=5`) | 0.2–0.9 s | 2–3 s | Fastest start, but choppy (detect fps) and behind: camera GOP + Frigate's detect pipeline + frame sampling. |
+| HLS (`video` → `…m3u8`, `camera_mode: stream`) | 7–12 s | 5–10 s | Avoid for live viewing; fine for non-urgent clips. |
+
+### Measurements
+
+Fire TV (AFTKA, Android 9), app 0.25.0, alternating runs, time from the popup request to the first
+rendered frame (`/state.lastPopup.firstFrameMs`):
+
+| Stream | WebRTC page in `web` | `whep` | Frigate MJPEG |
+|---|---|---|---|
+| `deurbel` (main, 2560×1920, 10 fps), 6 runs | 3423 ms (1977–6635) | 2343 ms (2207–2536) | 906 ms (883–934) |
+| `deurbel_noaudio` (go2rtc re-stream of the sub-stream), 5 runs | 6357 ms (5589–6698) | 2524 ms (2262–2772) * | — |
+| main streams after setting the camera keyframe interval to 1 s (`gop 1`), 6 runs over 4 cameras | — | **1.0–1.6 s** (avg 1.3 s) | — |
+
+\* Measured while that stream happened to be warm from the runs before. Cold, as in real use, it took
+6.4 s: go2rtc answered only after 4.2 s because it had to start the stream first.
+
+Where WHEP's time goes (its logcat timeline): offer after 73 ms, go2rtc's answer after 257 ms, video
+track after 354 ms, first frame after about 1.5 s. The rest of the wait is the **camera's keyframe**:
+WebRTC can only show a picture from the next I-frame, so a shorter I-frame interval on the camera
+starts every WebRTC route sooner (going from a 2 s to a 1 s interval brought the main streams down to
+1.0–1.6 s).
+
+**Use a stream go2rtc is already pulling.** A stream with no other viewer is started on demand: go2rtc
+answers only once it has connected to the camera, which took 3–4 s here. The main stream Frigate
+records from is always running, so its answer comes in ~0.3 s. A separate "no audio" re-stream is not
+needed: with `muted` (the default) the app asks for video only. Check with go2rtc's `/api/streams`: a
+stream with consumers is warm.
+
+### Keep the camera's keyframes under the TV's UDP buffer
+
+WebRTC sends each keyframe as one burst of UDP packets, and the TV's kernel has to hold that whole
+burst in the socket's receive buffer until Chromium reads it. On some Android TV boxes that buffer is
+small: a Nokia Streaming Box 8010 (Android 14, wired) caps it at **256 KB** (`/proc/sys/net/core/rmem_max`),
+and nothing an app can do raises it. A keyframe larger than that arrives with holes, WebRTC never gets
+a decodable frame, and the popup sits on its poster forever while the kernel counts the loss
+(`cat /proc/net/snmp | grep Udp` → `RcvbufErrors` climbing; logcat shows `video_receive_stream2.cc:
+No decodable frame … requesting keyframe` every 200 ms and `PacketBuffer is already at max size`).
+A Fire TV on Wi-Fi played the same streams; the symptom is per device.
+
+Measure your cameras' keyframes and keep them around **≤ 220 KB**:
+
+```sh
+ffprobe -v error -rtsp_transport tcp -select_streams v:0 -read_intervals %+4 \
+  -show_entries frame=key_frame,pkt_size -of csv=p=0 rtsp://<go2rtc>:8554/<cam> | grep ^1,
+```
+
+Measured here (all H.264 High, 10 fps, 1 s keyframe interval): 3 Mbit/s at 2880×1616 → 225–238 KB
+(played); 5 Mbit/s at 2560×1920 → 340 KB and 6 Mbit/s at 2560×1440/1920 → 420–535 KB (poster only).
+The fix was the camera's main-stream bitrate: 2560×1920 at 3 Mbit/s → 218 KB, 2560×1440 and the
+doorbell at 2 Mbit/s → ~215–225 KB. Note that halving the bitrate does not halve the keyframe (the
+encoder spends relatively more on I-frames when P-frames get cheap), so measure after each step. The
+alternative is a smaller stream for that TV only (the camera's sub-stream), at the cost of a softer
+picture and, for a stream nobody else pulls, the cold-start delay above.
+
+### The poster hand-over
+
+The poster (since 0.17.0) makes start-up time matter much less: a still of the same camera shows
+instantly and fades on the stream's first frame. For `whep` that moment comes from the app's own
+`<video>` element. For a `web` page the app injects a watcher: since 0.20.0 the poster waits until
+the page's video **actually plays** (not when the page paints), and since 0.20.1 there is no time limit
+once the page is seen to contain a `<video>`. Only a page where no video is ever found falls back to
+showing the page after 20 s.
 
 ## Supported devices
 
@@ -180,7 +261,7 @@ text, `/state`, `/notify`, `/cancel`, mDNS discovery, the overlay watchdog, and 
 | **`video_url`** — `rtsp://`, HLS `.m3u8` (incl. `camera_mode: stream`), progressive http (since 0.16.0) | **6.0.1+**, via ExoPlayer rendered in a `TextureView` — composited by the GPU inside the popup, so it also shows **over video the TV is already playing** (verified on a Fire TV with a film running). RTSP uses RTP-over-TCP. Audio only with `muted: false`. Not for DRM content (irrelevant for cameras). On **Android < 8 and Amlogic SoCs** video is decoded in software by default (since 0.17.2) because the vendor decoder froze the HDMI input on release; `softwareDecoder` overrides. |
 | MJPEG camera streams | use **`web_url`** (or the HA integration's `camera_mode: mjpeg`), never `image_url` — `image_url` decodes a single still image and cannot render a multipart MJPEG stream (it shows only the text). For a still, point `image_url` at a snapshot such as Frigate's `/api/<cam>/latest.jpg`. |
 | Screen **off** (`POST /power?state=off`) | any version, after a one-time device-admin **or** accessibility grant (`--power` / `--accessibility`); which route works depends on the device |
-| **Silent** self-update | **12+** only. On older devices the update still works but the system shows an install confirmation the app wakes the screen for and turns into a popup with a button — one press on the remote finishes it (see [the limitation](https://github.com/mhoogenbosch/ha-pipup#the-update-button-is-silent-only-on-android-12)) |
+| **Silent** self-update | **12+** only. On older devices the update still works but the system shows an install confirmation the app wakes the screen for and turns into a popup with a button — one press on the remote finishes it (see [the limitation](https://github.com/mhoogenbosch/ha-pipup#the-update-button-is-silent-only-on-android-12)). Silent on **any** version when ha-pipup ≥ 1.29.0 installs over ADB ([Advanced install](https://github.com/mhoogenbosch/ha-pipup#built-in-advanced-install-1290)) |
 | Restart after a **silent power-restore boot** (`LOCKED_BOOT_COMPLETED`) | **7.0+** (direct boot). On Android 6 there is no direct boot, so a restart relies on the normal `BOOT_COMPLETED` — fine on a TV/projector without a lock screen |
 | `specialUse` foreground-service type | 14+ (cosmetic; older run a normal foreground service) |
 
@@ -228,9 +309,15 @@ started from the background (see below) — there the app has to come up in the 
 > only on Android 12+; on older devices the OS forces an on-screen confirmation for any *app*-initiated
 > install (a platform limit — see [self-update](#what-this-fork-adds-compared-to-rogro82pipup)). A
 > **shell**-initiated `adb install -r`, which is what `install.sh` does, has no confirmation on any
-> Android version. Run it on a schedule (cron, or a Home Assistant `shell_command`) to keep older TVs
-> updated with no interaction — the [ha-pipup readme](https://github.com/mhoogenbosch/ha-pipup#the-update-button-is-silent-only-on-android-12)
-> has a ready-made automation.
+> Android version.
+>
+> **With Home Assistant you no longer need the script for that:** ha-pipup ≥ 1.29.0 does the same
+> install itself, in pure Python, so also on Home Assistant OS (no `adb` binary), and ≥ 1.30.0 can do
+> it automatically inside a quiet window at night. Turn on network debugging on the TV once and choose
+> *Advanced install* in the integration's options — see
+> [Advanced install](https://github.com/mhoogenbosch/ha-pipup#built-in-advanced-install-1290).
+> `install.sh` remains the way for the first install, and for keeping TVs updated without Home
+> Assistant (run it on a schedule).
 
 <details>
 <summary>Doing it by hand</summary>
@@ -362,6 +449,16 @@ trust boundary the network itself.
   grant the screen-off route (device admin / accessibility) on a TV you deliberately expose. Granting
   nothing leaves `/power?state=off` returning 501, and the device admin only asks for `force-lock` —
   no password, camera or wipe policies — so the worst an attacker gains is a TV that goes to standby.
+- Since 0.24.0 `/settings` is on the same port. Anyone on the LAN can point the push webhook at
+  their own host (and so read every later state change) or change the update source. The update
+  source cannot install a foreign app: Android only accepts an update signed with PiPup's own key.
+- Since 0.29.0 the port also takes `/launch`, `/key` and `/volume`: anyone on the LAN can start an app,
+  pause what is playing or change the volume — what a guest with the remote can do, no more. `/launch`
+  only starts apps and links; it cannot install, grant or change anything.
+- Since 0.29.0 nothing of PiPup goes into an Android backup or a device-to-device transfer: settings
+  include the push webhook URL (anyone holding it can post to it) and the stable device id, which would
+  make a new TV show up as the old one. A new or restored TV starts clean and is discovered as a new
+  device.
 
 ## Integrating
 
@@ -397,15 +494,77 @@ Example:
 }
 ```
 
-All fields are optional. For `media` you can specify 3 types:
+All fields are optional. For `media` you can specify 4 types:
 
 ```json 
 { "image": { "uri": "address_to_your_image", "width": 480 }}
 { "video": { "uri": "address_to_your_video", "width": 480, "muted": true }}
 { "web":   { "uri": "address_to_your_resource", "width": 640, "height": 480, "muted": true }}
+{ "whep":  { "uri": "http://go2rtc:1984/api/webrtc?src=doorbell", "width": 640, "height": 480 }}
 ```
 
-`poster` (since 0.17.0, video and web): URL of a still image shown over the stream area until the
+`whep` (since 0.25.0): a WebRTC stream played straight from a
+[WHEP](https://datatracker.ietf.org/doc/draft-ietf-wish-whep/) (IETF draft) endpoint, such as go2rtc's `/api/webrtc?src=<stream>`.
+The app loads a small player page of its own (with the endpoint's origin as base, so no CORS setup is
+needed), sends one SDP offer, and plays the answer. Compared with go2rtc's `stream.html` in a `web`
+popup this skips the page download, its player script and the websocket signalling. `muted` defaults
+to `true` (no audio track is requested); `poster` and `transparent` work as for `web`. On a failed
+offer or a dropped connection it retries with backoff (1, 2, 4, then every 8 s).
+`/state.lastPopup.mediaError` holds the last error (for example `HTTP 404` for an unknown stream
+name); with adb, `logcat -s PopupView` shows a timeline per attempt (offer, answer, track, playing).
+
+#### Full-screen popups
+
+Since 0.29.1. `"fullscreen": true` on any popup makes its window cover the whole display, status and
+navigation bars included, with the content centred. Without it an overlay is laid out *inside* the
+system bars: on a device that has them (a tablet, an intercom panel) a page sized to the screen stops
+short of the edges and the app underneath shows as strips. TVs have no bars, so there it makes no
+visible difference. For a frameless full-screen page:
+
+```json
+{ "id": "screensaver", "duration": 0, "fullscreen": true, "padding": 0, "borderWidth": 0,
+  "media": { "web": { "uri": "http://ha.local:8123/local/clock.html", "width": 1024, "height": 600 } } }
+```
+
+A full-screen popup never stacks. Touch keeps working for a popup without buttons; note that it then
+also takes every touch away from the app underneath for as long as it is up.
+
+#### Camera wall (`grid`)
+
+Since 0.29.0. Several WHEP streams side by side in one popup:
+
+```json
+{ "id": "camera_wall", "duration": 0, "position": "center", "padding": 0,
+  "media": { "grid": {
+    "items": [
+      { "uri": "http://go2rtc:1984/api/webrtc?src=doorbell", "label": "Doorbell",
+        "poster": "http://frigate:5000/api/doorbell/latest.jpg" },
+      { "uri": "http://go2rtc:1984/api/webrtc?src=driveway", "label": "Driveway" },
+      { "uri": "http://go2rtc:1984/api/webrtc?src=garden", "label": "Garden" },
+      { "uri": "http://go2rtc:1984/api/webrtc?src=shed", "label": "Shed" }
+    ],
+    "fullscreen": true } } }
+```
+
+| Field | Default | |
+|---|---|---|
+| `items` | — | 1 to 9 tiles: `uri` (WHEP endpoint), optional `label` and `poster` |
+| `columns` | auto | auto = 1, 2, 2, 2, 3, 3, 3, 3, 3 columns for 1..9 tiles |
+| `width` / `height` | 1280 / 720 | size of the whole grid in px |
+| `fullscreen` | `false` | fill the whole screen, system bars included (minus the popup `padding`; use `padding: 0` for edge to edge) — implies the popup's own `fullscreen` |
+| `gap` | 4 | px between tiles |
+| `labels` | `true` | show the captions |
+| `muted` | `true` | `false` requests audio from every tile |
+
+Each tile is its own WebRTC connection with the same retry as `whep`, so a camera that is down shows its
+poster (or black) while the rest play. A tile's poster stays until that tile plays. `/state.lastPopup`
+reports `firstFrameMs` for the first tile that plays, and `mediaError` names the tile by its label.
+**All tiles must come from the same server as the first one** — the page is loaded with that origin so
+the SDP offers are same-origin, and go2rtc sends no CORS headers by default. Every tile is decoded on
+the TV, so a wall of main streams can be more than a small streaming stick manages: point the tiles at
+the cameras' substreams.
+
+`poster` (since 0.17.0, video and web; whep since 0.25.0): URL of a still image shown over the stream area until the
 stream renders its first frame, then faded out. Use a camera snapshot (e.g. Frigate
 `/api/<cam>/latest.jpg`) so the popup shows a picture instantly instead of an empty frame while
 RTSP connects or the WebView starts. The stream area takes the poster's aspect, so still and live
@@ -428,6 +587,16 @@ hardware. `/state.lastPopup.media.softwareDecoder` echoes the requested value (`
 { "video": { "uri": "rtsp://cam/sub", "width": 640, "softwareDecoder": true }}
 ```
 
+`height` (since 0.28.0, video only, px, optional): the stream area's height until the first frame. Without it the
+box is 16:9 and then takes the poster's aspect. Set it when the camera's snapshot has a different pixel shape
+than its picture (an NVR serving a 704×480 still of a 4:3 image): the box then keeps this height and the poster
+no longer resizes it. Once the stream paints, the box follows the stream's display aspect (also since 0.28.0:
+anamorphic streams with a non-square pixel aspect are no longer squashed). Contributed by @pelkiegr (#67, #69).
+
+```json
+{ "video": { "uri": "rtsp://nvr/sub", "width": 640, "height": 480, "poster": "http://nvr/snapshot.jpg" }}
+```
+
 
 `dismissScreensaver` (since 0.18.0, default `true`): end an active screensaver / ambient mode before the
 popup is shown, so it is seen on every Android version (some dream layers cover app overlays; Android 12+
@@ -444,10 +613,10 @@ path, which on some Fire TVs briefly renegotiates HDMI audio.
 { "id": "doorbell", "title": "Front door", "sound": "default", "soundVolume": 0.8 }
 ```
 
-`opacity` (since 0.22.0, 0..1, default 1): draws the whole popup, media included, at that alpha, so the
+`opacity` (since 0.24.0, 0..1, default 1): draws the whole popup, media included, at that alpha, so the
 picture behind it stays visible. Works with every media type and with `animation`.
 
-`transparent` (since 0.22.0, `web` media only, default `false`): the WebView paints no background, so a
+`transparent` (since 0.24.0, `web` media only, default `false`): the WebView paints no background, so a
 page with a transparent `html, body { background: transparent }` shows the TV through it. Combine with
 `"backgroundColor": "#00000000"` and `"padding": 0` for a frameless, see-through overlay:
 
@@ -462,6 +631,26 @@ near-borderless look.
 
 `buttonSize` (since 0.19.0, sp): scales the popup buttons' text and padding together. Without it the
 buttons look exactly as before.
+
+Button style (since 0.28.0, each optional; unset = the classic look): `buttonColor` (fill of an unfocused
+button), `buttonFocusColor` (fill of the focused one), `buttonTextColor`, `buttonBorderColor` (outline, both
+states) and `buttonCornerRadius` (px, `0` = square). Colors are `#RRGGBB` or `#AARRGGBB`; a malformed value falls
+back to the classic color. Contributed by @pelkiegr (#70).
+
+Camera popup look (since 0.28.0, each off by default; contributed by @pelkiegr, #71):
+- `liveBadge: true` puts a "Live" pill on the stream area once the **first frame** renders (never on the
+  poster). `liveBadgeColor` (default amber `#FFA500`) and `liveBadgePosition` (`top_left`, `top_right`,
+  `bottom_left`, `bottom_right` (default)). For video, whep and web media.
+- `mediaFullBleed: true` lets the media run edge to edge across the top of the popup, its top corners rounded
+  with the popup's `cornerRadius`; title, message and buttons keep the padding.
+- `buttonsInline: true` puts the buttons at the end of the title/message row instead of on their own row,
+  e.g. a single compact "✕". A popup without title, message or icon keeps its button row.
+
+```json
+{ "title": "Front door", "message": "Motion", "cornerRadius": 24, "mediaFullBleed": true,
+  "liveBadge": true, "buttonsInline": true, "buttons": [{ "id": "close", "label": "✕" }],
+  "media": { "whep": { "uri": "http://go2rtc:1984/api/webrtc?src=doorbell", "width": 640, "height": 360 } } }
+```
 
 `animation` (since 0.19.0, default none): `fade`, `slide_left`, `slide_right`, `slide_top` or
 `slide_bottom`. Plays when the popup is built; an update-in-place of the same popup does not re-animate.
@@ -546,6 +735,17 @@ next to the icon, and the `media` image (if any) stays below.
   popup in place, keeping its place in the stack.
 - `bringToFront` (since 0.24.0, default `false`): a redraw of a popup already on screen opens it on
   top of the others instead of in its old place.
+- `stack` (since 0.27.0, default none): `"vertical"` or `"horizontal"` lines the popup up with the
+  other stacking popups at the **same position** instead of drawing it over them.
+  - The first popup keeps the usual place. Each next one goes right after the previous one, with a
+    12 px gap. Vertical moves away from the top/bottom edge, horizontal away from the left/right
+    edge. On a centred axis the stack continues downwards (`center_left`/`center_right`) or to the
+    right (`top_center`/`bottom_center`).
+  - When a popup closes, the rest move up into the gap. When one changes size (a video popup grows
+    as its first frame arrives), the stack is laid out again.
+  - Popups without `stack` keep their fixed place and may overlap the stack. `center` never stacks.
+  - The stack is not limited to the screen: keep media small when many popups can be up at once.
+  - Requested in [#64](https://github.com/mhoogenbosch/PiPup/issues/64).
 
 #### multipart/form-data (uploaded image file)
 
@@ -561,7 +761,7 @@ Form-fields:
 | --------------- | -------------------------------------------- |
 | duration        | Integer (default=30, 0=indefinite)           |
 | id              | String (optional popup identifier)           |
-| position        | Integer (0..4, default=0)                    |
+| position        | Integer (0..8, default=0)                    |
 | title           | String                                       |
 | titleSize       | Integer (default=16)                         |
 | titleColor      | string (default=#FFFFFF, format=[AA]RRGGBB   |
@@ -582,7 +782,7 @@ Form-fields:
 | iconWidth       | Integer pixels (default=96, since 0.13.0)    |
 | showProgress    | Boolean (default=false, since 0.7.0)         |
 
-`position` is an enum ranging from 0 to 4:
+`position` is an enum ranging from 0 to 8 — the full 3×3 grid:
 
 |  | Position    |
 | -----: | ----------- |
@@ -591,6 +791,14 @@ Form-fields:
 | 2     | BottomRight |
 | 3     | BottomLeft  |
 | 4     | Center      |
+| 5     | TopCenter (since 0.22.0) |
+| 6     | BottomCenter (since 0.22.0) |
+| 7     | CenterLeft (since 0.26.0) |
+| 8     | CenterRight (since 0.26.0) |
+
+Edge positions keep a 20 px margin from the screen edge; on a centred axis the popup is centred
+exactly. `TopRight`, `CenterRight` and `BottomRight` therefore stack cleanly along one side when
+several popups (with their own `id`) are shown at once.
 
 Color-properties are in `[AA]RRGGBB` where the alpha channel is optional, e.g. #FFFFFF or #CCFFFFFF.
 
@@ -608,6 +816,11 @@ Since 0.24.0 several popups can be up at once:
 - `POST /cancel?all=true` removes every popup.
 
 When nothing matches, the call is a no-op (HTTP 200 with an explanatory message).
+
+> **Breaking since 0.24.0:** before, `POST /cancel` without an id removed whatever popup was on screen.
+> Now it only removes a popup sent *without* an id. A client that shows popups with an `id` and cancels
+> without one leaves them up — with `duration: 0` for good — and still gets `200`. Cancel with the same
+> `id`, or with `?all=true`.
 
 ### Screen on/off
 
@@ -676,6 +889,41 @@ purely so `GLOBAL_ACTION_LOCK_SCREEN` can be called, and reads nothing from your
 ```json
 "power": { "canWake": true, "canSleep": true, "sleepMethod": "device_admin" }
 ```
+
+### TV control
+
+Since 0.29.0. Remote-control actions without adb. Like `/power`, each call answers with what happened:
+`{"ok": true, "message": "…", …}` with HTTP 200, **404** for an app that is not installed, **501** when
+this device cannot do it, 400 for a malformed request.
+
+| Path | Method | Parameters |
+|---|---|---|
+| `/apps` | GET | — answers `{"apps": [{"package", "label", "tv"}]}`, sorted by label (`tv` = has a TV launcher entry) |
+| `/launch` | POST | `package=<name>` and/or `uri=<deep link>`; `wake=false` to leave a sleeping screen off |
+| `/key` | POST | `key=play_pause\|play\|pause\|stop\|next\|previous\|rewind\|fast_forward\|home\|back` |
+| `/volume` | GET / POST | one of `level=0-100`, `step=up\|down`, `mute=on\|off\|toggle`; `ui=false` hides the volume bar |
+
+```
+curl -X POST "http://tv:7979/launch?package=com.netflix.ninja"
+curl -X POST "http://tv:7979/launch?uri=https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+curl -X POST "http://tv:7979/key?key=play_pause"
+curl -X POST "http://tv:7979/volume?level=30"
+```
+
+- **Launch** works on every device where popups work: "display over other apps" also exempts PiPup from
+  Android's background-activity-start rules. A sleeping screen is woken first (unless `wake=false`).
+  With only `uri`, Android picks the app that handles the link; add `package` to force one.
+- **Media keys** go to the app that currently holds the media session (Netflix, YouTube, Spotify,
+  Jellyfin, Kodi, …) — the same path as the play button on a Bluetooth remote. An app without a media
+  session ignores them.
+- **Home and back** need the accessibility service (`install.sh --accessibility`); without it they answer
+  501 and are left out of `/state.control.keys`.
+- **Volume** is the media stream (`STREAM_MUSIC`). On a box whose volume belongs to the TV set or an
+  amplifier over HDMI-CEC, `/state.volume.fixed` is `true`: `level=` then answers 501, while `step` and
+  `mute` are passed on and the platform forwards them over CEC where it can. A volume change, also one
+  made with the remote, is pushed as `volume_changed`.
+- PiPup cannot see which app is in the foreground (that needs usage access, a grant with no screen on a
+  TV). `/state.control.lastLaunched` is only what PiPup itself started.
 
 ### Permission screen
 
@@ -797,23 +1045,28 @@ anyway.
 | Path:         | /settings[?updateChecks=true\|false] |
 | Method:       | GET or POST                         |
 
-Since 0.22.0. Persistent device settings, kept across restarts and updates. `updateChecks` (default
+Since 0.24.0. Persistent device settings, kept across restarts and updates. `updateChecks` (default
 `true`) switches the twice-daily GitHub release check on or off: a TV kept off the internet on purpose
 then makes no outbound calls. Both methods answer the current values, e.g. `{"updateChecks":false}`.
 
-Since 0.23.0 (davbebawy fork) two more keys:
+Two more keys:
 
 - `webhook`: an `http(s)` URL. The app POSTs its `/state` JSON plus an `event` field to it on every
-  change: `popup_shown` (with `shownId`, since 0.24.0), `popup_replaced` (with `shownId` and
-  `replacedId`; since 0.24.0 both are the id that was redrawn), `popup_removed` (with `reason`
+  change: `popup_shown` (with `shownId`), `popup_replaced` (with `shownId` and
+  `replacedId`, both the id that was redrawn), `popup_removed` (with `reason`
   expired / cancelled / button / back / watchdog, and `removedId`), `started`, `screen_on`,
-  `screen_off`, `permissions`, and `settings` right after the webhook is set. A failed POST is
+  `screen_off`, `permissions`, `volume_changed` and `control` (after a launch, key or volume call;
+  since 0.29.0), and `settings` right after the webhook is set. A failed POST is
   retried once after 2 s. Empty turns push off. `/settings` answers only whether one is set: the URL
   is the controller's secret. `/state.push` shows the last push result.
-- `updateSource`: `github:<owner>/<repo>` (default `github:davbebawy/PiPup`), or an `http(s)` folder
+- `updateSource`: `github:<owner>/<repo>` (default `github:mhoogenbosch/PiPup`), or an `http(s)` folder
   URL holding `releases.json` (GitHub's `/releases` answer saved as is) and the APKs under their
   release names. The first release that is neither draft nor prerelease wins. Empty resets to the
-  default.
+  default. A different source cannot slip in a foreign app: Android only installs an update signed
+  with the same key as the installed PiPup.
+
+Like the rest of the API, `/settings` has no authentication: anything on the LAN can change it. Keep
+the TVs on a network you trust.
 
 ### State
 
@@ -842,6 +1095,9 @@ Returns the current state as JSON:
     { "id": "doorbell", "position": "BottomRight", "duration": 0, "indefinite": true, "elapsed": 42, "media": "video" }
   ],
   "power": { "canWake": true, "canSleep": true, "sleepMethod": "device_admin" },
+  "control": { "launch": true, "keys": ["play_pause", "play", "pause", "stop", "next", "previous",
+               "rewind", "fast_forward"], "lastLaunched": "com.netflix.ninja", "lastLaunchedSecondsAgo": 300 },
+  "volume": { "level": 47, "step": 7, "max": 15, "muted": false, "fixed": false },
   "permissions": {
     "overlay": true, "installPackages": true, "autoStart": null,
     "deviceAdmin": true, "accessibility": false, "complete": true,
@@ -849,6 +1105,9 @@ Returns the current state as JSON:
   }
 }
 ```
+
+Since v0.29.0 `control` lists what [TV control](#tv-control) can do here, and `volume` the media volume
+(`fixed: true` = it belongs to the TV set or amplifier).
 
 Since v0.24.0 `popups` lists every popup on screen in stack order (the last one is on top; `id` is
 `null` for the popup sent without an id). `visible` is true while any popup is up, and `popup` is the
@@ -880,6 +1139,11 @@ records `id` (the stable device id), `name` and `version`, enabling automatic di
 
 CI builds an APK on every push (see `.github/workflows/build.yml`); tagged releases get the APK
 attached automatically. Locally: JDK 17 + Android SDK 35, then `./gradlew assembleDebug`.
+
+## License
+
+[MIT](LICENSE) for the work in this fork. The original PiPup by rogro82 was published without a
+license; its code remains his.
 
 ## Changelog
 

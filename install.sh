@@ -17,7 +17,7 @@ set -uo pipefail
 PACKAGE="nl.rogro82.pipup"
 ADMIN_COMPONENT="$PACKAGE/.AdminReceiver"
 ACCESSIBILITY_COMPONENT="$PACKAGE/$PACKAGE.PiPupAccessibilityService"
-REPO="davbebawy/PiPup"
+REPO="mhoogenbosch/PiPup"
 PORT=7979
 
 APK=""
