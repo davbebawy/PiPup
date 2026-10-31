@@ -1064,6 +1064,18 @@ Two more keys:
   release names. The first release that is neither draft nor prerelease wins. Empty resets to the
   default. A different source cannot slip in a foreign app: Android only installs an update signed
   with the same key as the installed PiPup.
+- `watch` (TV state push): a comma list of what to watch, each `prop:<system property>` or
+  `system:`/`secure:`/`global:<settings key>`, e.g. `prop:sys.tcl.inputid,system:recent_play_channel_id`
+  (at most 32). Nothing vendor-specific is built in: the controller sends the list. A change is pushed
+  as `watch` with `key` (the entry as sent), `old` and `new`; the first read after a change of the list
+  is not pushed. Settings keys are observed (pushed within a second); properties have no change
+  callback, so they are read every 500 ms, only while one is watched. `/state.watch` holds `keys`,
+  `values` (null = unset or not readable) and `errors` (a key the device refuses to an app). Empty
+  watches nothing.
+
+A shell script on the TV can report a job result the same way: `am broadcast -a nl.rogro82.pipup.JOB
+--es kind <kind> --es run <id> --es result <result>` pushes `job` with `kind`, `run` and `result`. The
+receiver requires the `DUMP` permission, which the adb shell holds and apps do not.
 
 Like the rest of the API, `/settings` has no authentication: anything on the LAN can change it. Keep
 the TVs on a network you trust.

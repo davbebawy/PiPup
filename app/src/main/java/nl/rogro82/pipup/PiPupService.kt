@@ -95,6 +95,24 @@ class PiPupService : Service(), WebServer.Handler {
         }
     }
     private val mVolumePush = Runnable { emit("volume_changed") }
+    /// TV state push: watched properties and settings keys, each change pushed as "watch".
+    private val mWatcher by lazy {
+        Watcher(this, mHandler) { c -> emit("watch", mapOf("key" to c.id, "old" to c.old, "new" to c.new)) }
+    }
+    /// Job results from a shell script on the TV (SPEC W5):
+    /// `am broadcast -a nl.rogro82.pipup.JOB --es kind <k> --es run <id> --es result <r>`.
+    /// Registered with the DUMP permission: the shell holds it, apps do not, so no
+    /// installed app can fake a job result.
+    private val mJobReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            intent ?: return
+            emit("job", mapOf(
+                "kind" to intent.getStringExtra("kind"),
+                "run" to intent.getStringExtra("run"),
+                "result" to intent.getStringExtra("result")
+            ))
+        }
+    }
     /// Permissions as last pushed; a difference is pushed as a "permissions" event.
     @Volatile private var mLastPermissions: Map<String, Any?>? = null
     // Last *received* popup (survives dismiss/expiry) — shown on the status screen and
@@ -160,6 +178,12 @@ class PiPupService : Service(), WebServer.Handler {
             addAction("android.media.VOLUME_CHANGED_ACTION")
             addAction("android.media.STREAM_MUTE_CHANGED_ACTION")
         })
+        androidx.core.content.ContextCompat.registerReceiver(
+            this, mJobReceiver, android.content.IntentFilter(ACTION_JOB),
+            android.Manifest.permission.DUMP, mHandler,
+            androidx.core.content.ContextCompat.RECEIVER_EXPORTED
+        )
+        startWatcher()
 
         // Android < 12: the installer wants an on-screen confirmation. See
         // launchInstallConfirmation() for why it is launched the way it is (0.26.1, #41).
@@ -256,6 +280,8 @@ class PiPupService : Service(), WebServer.Handler {
         runCatching { unregisterReceiver(mDreamReceiver) }
         runCatching { unregisterReceiver(mScreenReceiver) }
         runCatching { unregisterReceiver(mVolumeReceiver) }
+        runCatching { unregisterReceiver(mJobReceiver) }
+        runCatching { mWatcher.stop() }
         // 2026-10-08: overlay windows, popup timers and queued requests outlived the
         // service, and the update callback kept pointing at it. Each step guarded:
         // onDestroy must never throw.
@@ -602,6 +628,24 @@ class PiPupService : Service(), WebServer.Handler {
             ?.takeIf { UpdateManager.isValidSource(it) } ?: UpdateManager.DEFAULT_SOURCE
     }
 
+    /// Start (or restart) the watch list stored in prefs. A stored list that no longer
+    /// parses watches nothing rather than failing the service start.
+    private fun startWatcher() {
+        val keys = try {
+            Watch.parse(prefs().getString(PREF_WATCH, null))
+        } catch (ex: IllegalArgumentException) {
+            Log.w(LOG_TAG, "stored watch list ignored: ${ex.message}")
+            emptyList()
+        }
+        mHandler.post {
+            // Sync re-sends the same list: a restart would blank the values for a moment
+            if (keys == mWatcher.keys) return@post
+            mWatcher.start(keys)
+            // the first reads are not pushed as changes: hand the controller all of them
+            emit("settings")
+        }
+    }
+
     /// GET/POST /settings: persistent device settings, POSTed as query parameters,
     /// e.g. `POST /settings?updateChecks=false`; both methods answer the current values.
     /// `updateChecks` (0.24.0, true/false): the twice-daily release check.
@@ -632,6 +676,15 @@ class PiPupService : Service(), WebServer.Handler {
                 }
                 prefs().edit().putString(PREF_UPDATE_SOURCE, v.ifEmpty { null }).apply()
             }
+            // watch (TV state push): comma list of prop:<name>, system:|secure:|global:<key>;
+            // empty = watch nothing
+            session.parameters["watch"]?.firstOrNull()?.let { v ->
+                try { Watch.parse(v) } catch (ex: IllegalArgumentException) {
+                    return InvalidRequest(ex.message)
+                }
+                prefs().edit().putString(PREF_WATCH, v.ifEmpty { null }).apply()
+                startWatcher()
+            }
             loadSettings()
             // a controller that just set its webhook gets the current state at once
             if (session.parameters.containsKey("webhook")) emit("settings")
@@ -642,6 +695,7 @@ class PiPupService : Service(), WebServer.Handler {
             Json.writeValueAsString(mapOf(
                 "updateChecks" to updateChecksEnabled(),
                 "updateSource" to UpdateManager.source,
+                "watch" to prefs().getString(PREF_WATCH, null),
                 // the URL itself is the controller's secret: say whether one is set, not what
                 "webhook" to !Pusher.url.isNullOrBlank()
             ))
@@ -1330,6 +1384,8 @@ class PiPupService : Service(), WebServer.Handler {
                 "secondsAgo" to ((SystemClock.elapsedRealtime() - mLastPopupAt) / 1000)
             )
         }
+        // TV state push: watched keys, their current values and read errors
+        state["watch"] = mWatcher.state()
         state["push"] = mapOf(
             // a controller that sees this can stop polling and set a webhook instead
             "supported" to true,
@@ -1804,6 +1860,8 @@ class PiPupService : Service(), WebServer.Handler {
         const val PREF_UPDATE_CHECKS = "update_checks"
         const val PREF_WEBHOOK = "webhook"
         const val PREF_UPDATE_SOURCE = "update_source"
+        const val PREF_WATCH = "watch"
+        const val ACTION_JOB = "nl.rogro82.pipup.JOB"
         const val UPDATE_POPUP_ID = "pipup-update"
         const val CONFIRM_POPUP_ID = "pipup-update-confirm"
         /// MainActivity intent action: launch the pending install confirmation (0.26.1).

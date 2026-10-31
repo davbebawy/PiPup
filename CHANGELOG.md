@@ -8,6 +8,12 @@ Every version below has a [GitHub release](https://github.com/mhoogenbosch/PiPup
 full story (English and Dutch) and the APK.
 
 ## [Unreleased]
+### Added
+- TV state push: `POST /settings?watch=` takes a list of system properties and settings keys; each
+  change is pushed as event `watch` (`key`, `old`, `new`) and `/state.watch` holds the current values.
+  Settings keys are observed, properties read every 500 ms only while one is watched.
+- Job results from a shell script: broadcast `nl.rogro82.pipup.JOB` (`kind`, `run`, `result`) is
+  pushed as event `job`; only a sender with `DUMP` (the adb shell) gets through.
 ### Docs
 - Readme: Android < 12 TVs update silently from Home Assistant now — ha-pipup 1.29.0 installs over ADB
   itself (also on Home Assistant OS) and 1.30.0 does it automatically at night (#76). `install.sh` stays
