@@ -144,6 +144,11 @@ class PiPupService : Service(), WebServer.Handler {
             Log.e(LOG_TAG, "Port $SERVER_PORT not bound yet; the watchdog retries every ${WATCHDOG_INTERVAL_MS / 1000} s")
         }
 
+        // X1: each change of the app in front is pushed as "foreground_app"
+        ForegroundApp.onChange = {
+            val state = ForegroundApp.state(this)
+            emit("foreground_app", mapOf("package" to state["package"], "previous" to state["previous"]))
+        }
         loadSettings()
         registerNsd()
         startWatchdog()
@@ -256,6 +261,7 @@ class PiPupService : Service(), WebServer.Handler {
         runCatching { unregisterReceiver(mDreamReceiver) }
         runCatching { unregisterReceiver(mScreenReceiver) }
         runCatching { unregisterReceiver(mVolumeReceiver) }
+        runCatching { ForegroundApp.onChange = null }
         // 2026-10-08: overlay windows, popup timers and queued requests outlived the
         // service, and the update callback kept pointing at it. Each step guarded:
         // onDestroy must never throw.
@@ -600,6 +606,12 @@ class PiPupService : Service(), WebServer.Handler {
         Pusher.url = p.getString(PREF_WEBHOOK, null)
         UpdateManager.source = p.getString(PREF_UPDATE_SOURCE, null)
             ?.takeIf { UpdateManager.isValidSource(it) } ?: UpdateManager.DEFAULT_SOURCE
+        val foreground = p.getBoolean(PREF_FOREGROUND_APP, false)
+        if (foreground != ForegroundApp.enabled) {
+            ForegroundApp.enabled = foreground
+            if (!foreground) ForegroundApp.reset()
+            PiPupAccessibilityService.foregroundWatchChanged()
+        }
     }
 
     /// GET/POST /settings: persistent device settings, POSTed as query parameters,
@@ -624,6 +636,15 @@ class PiPupService : Service(), WebServer.Handler {
                 }
                 prefs().edit().putString(PREF_WEBHOOK, v.ifEmpty { null }).apply()
             }
+            // foregroundApp (X1): push the app in front; needs the accessibility service
+            session.parameters["foregroundApp"]?.firstOrNull()?.let { v ->
+                val on = when (v.lowercase()) {
+                    "true", "1", "on" -> true
+                    "false", "0", "off" -> false
+                    else -> return InvalidRequest("foregroundApp must be true or false")
+                }
+                prefs().edit().putBoolean(PREF_FOREGROUND_APP, on).apply()
+            }
             // updateSource (0.24.0): github:<owner>/<repo>, or an http(s) folder URL
             // holding releases.json and the APKs; empty = back to the default
             session.parameters["updateSource"]?.firstOrNull()?.let { v ->
@@ -642,6 +663,7 @@ class PiPupService : Service(), WebServer.Handler {
             Json.writeValueAsString(mapOf(
                 "updateChecks" to updateChecksEnabled(),
                 "updateSource" to UpdateManager.source,
+                "foregroundApp" to ForegroundApp.enabled,
                 // the URL itself is the controller's secret: say whether one is set, not what
                 "webhook" to !Pusher.url.isNullOrBlank()
             ))
@@ -1330,6 +1352,8 @@ class PiPupService : Service(), WebServer.Handler {
                 "secondsAgo" to ((SystemClock.elapsedRealtime() - mLastPopupAt) / 1000)
             )
         }
+        // X1: the app in front, when the foreground app push is on
+        state["foregroundApp"] = ForegroundApp.state(this)
         state["push"] = mapOf(
             // a controller that sees this can stop polling and set a webhook instead
             "supported" to true,
@@ -1804,6 +1828,7 @@ class PiPupService : Service(), WebServer.Handler {
         const val PREF_UPDATE_CHECKS = "update_checks"
         const val PREF_WEBHOOK = "webhook"
         const val PREF_UPDATE_SOURCE = "update_source"
+        const val PREF_FOREGROUND_APP = "foreground_app"
         const val UPDATE_POPUP_ID = "pipup-update"
         const val CONFIRM_POPUP_ID = "pipup-update-confirm"
         /// MainActivity intent action: launch the pending install confirmation (0.26.1).

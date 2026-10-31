@@ -882,7 +882,9 @@ including an update) drops the app out of the enabled list, and screen-off silen
 the flag in the install itself. The device admin route does not have this problem.
 
 The accessibility service declares no event types and does not retrieve window content: it is bound
-purely so `GLOBAL_ACTION_LOCK_SCREEN` can be called, and reads nothing from your screen.
+so `GLOBAL_ACTION_LOCK_SCREEN` and the home/back keys can be used, and reads nothing from your screen.
+The one exception is opt-in: with `foregroundApp` on (see Settings) it subscribes to window-state
+changes and reads the package and class name of the window that comes to the front, never its content.
 
 `/state` publishes the capability so a client can hide a button it cannot honour:
 
@@ -1064,6 +1066,11 @@ Two more keys:
   release names. The first release that is neither draft nor prerelease wins. Empty resets to the
   default. A different source cannot slip in a foreign app: Android only installs an update signed
   with the same key as the installed PiPup.
+- `foregroundApp` (`true`/`false`, default `false`): push the app in front (live TV, Netflix, YouTube).
+  Needs the accessibility service enabled. Each change is pushed as `foreground_app` with `package` and
+  `previous`; `/state.foregroundApp` holds `enabled`, `available` (the accessibility service is bound),
+  `package`, `previous` and `secondsAgo`. PiPup's own popups, dialogs, the keyboard and system UI do not
+  count as an app.
 
 Like the rest of the API, `/settings` has no authentication: anything on the LAN can change it. Keep
 the TVs on a network you trust.

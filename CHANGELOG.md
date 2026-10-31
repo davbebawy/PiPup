@@ -8,6 +8,10 @@ Every version below has a [GitHub release](https://github.com/mhoogenbosch/PiPup
 full story (English and Dutch) and the APK.
 
 ## [Unreleased]
+### Added
+- Foreground app push (opt-in): `POST /settings?foregroundApp=true` makes the accessibility service report
+  the app in front; each change is pushed as `foreground_app` (`package`, `previous`) and
+  `/state.foregroundApp` holds it. Window content is still never read.
 ### Docs
 - Readme: Android < 12 TVs update silently from Home Assistant now — ha-pipup 1.29.0 installs over ADB
   itself (also on Home Assistant OS) and 1.30.0 does it automatically at night (#76). `install.sh` stays

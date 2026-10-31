@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Deliberately observes nothing: no accessibilityEventTypes and no
      canRetrieveWindowContent, so the service never sees any UI content. It is
-     only bound so PiPup can call GLOBAL_ACTION_LOCK_SCREEN (screen off). -->
+     bound so PiPup can call GLOBAL_ACTION_LOCK_SCREEN (screen off) and the
+     home/back keys. Only the opt-in foreground app push (settings
+     foregroundApp=true) adds window-state changes at runtime: package and class
+     name of the window in front, still no content. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
         android:accessibilityFeedbackType="feedbackGeneric"
         android:description="@string/accessibility_service_description"
