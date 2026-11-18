@@ -7,6 +7,17 @@ Original app by [rogro82](https://github.com/rogro82/PiPup).
 Every version below has a [GitHub release](https://github.com/mhoogenbosch/PiPup/releases) with the
 full story (English and Dutch) and the APK.
 
+## [v1.0.0-beta.1-david.1] - 2026-11-18 (davbebawy fork: upstream 1.0.0-beta.1 plus TV state push, signed with the fork key)
+Fork build, not an upstream release. Installs only over a PiPup signed with the fork key.
+### Added
+- TV state push: `POST /settings?watch=` takes a list of system properties and settings keys; each
+  change is pushed as event `watch` (`key`, `old`, `new`) and `/state.watch` holds the current values.
+  Settings keys are observed, properties read every 500 ms only while one is watched.
+- Job results from a shell script: broadcast `nl.rogro82.pipup.JOB` (`kind`, `run`, `result`) is
+  pushed as event `job`; only a sender with `DUMP` (the adb shell) gets through.
+### Changed
+- CI: a tag with `-david.` is a full release, not a prerelease, so the app's updater and ha-pipup offer it.
+
 ## [Unreleased — v1.0.0]
 Everything from the 0.32.0 and 0.33.0 test releases (#83, #88, #89), in one release. There is no 0.32.0
 or 0.33.0 release. With these PiPup covers almost everything the Android TV (ADB) integration of Home
