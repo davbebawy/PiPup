@@ -10,12 +10,27 @@ streams) on your TV from your home-automation system, for **as long as you want*
 >
 > Contributors to this fork: [David Bebawy (davbebawy)](https://github.com/davbebawy) built several
 > popups at once, push to a webhook, see-through popups and the configurable update source (0.24.0);
-> [andrewm1205](https://github.com/andrewm1205) added the top/bottom center positions (0.22.0).
+> [andrewm1205](https://github.com/andrewm1205) added the top/bottom center positions (0.22.0);
+> [rshadow](https://github.com/rshadow) added `posterMode` (1.0.0).
 
 ![](graphics/screenshot-1.png)
 
 ## What this fork adds (compared to [rogro82/PiPup](https://github.com/rogro82/PiPup))
 
+**Since 1.0.0** PiPup covers almost everything the Android TV (ADB) integration of Home Assistant offers:
+what plays and its artwork, seeking, play/pause, the app in front and a picture of the screen, next to
+launching apps, keys, volume and screen on/off. adb is needed once, to grant access; nothing keeps an adb
+connection open.
+
+- **The app in front, and a picture of the screen** (since 1.0.0) — `/state.foreground` says which app
+  is on screen, also when nothing plays (the launcher, a menu), and `GET /screen.jpg` answers a picture
+  of the screen on Android 11+. Both are off until granted over adb, and the picture also takes a token.
+  See [The app in front](#the-app-in-front) and [A picture of the screen](#a-picture-of-the-screen).
+- **What plays, and a button press** (since 1.0.0) — `GET /media` reports the playing app, title,
+  state and position in any app with a media session, `GET /media/art` its artwork, `POST /media/seek`
+  jumps to an exact time, and `POST /click` presses a button in an app you allowed (Play on a Plex title
+  page that a deep link opened). With session access, play and pause go straight into the app's session. Both are off until granted over adb. See [Media sessions](#media-sessions) and
+  [Pressing a button in an app](#pressing-a-button-in-an-app).
 - **TV control** (since 0.29.0) — `POST /launch` starts an app or opens a deep link, `POST /key` sends
   media keys (play/pause, next, …), `POST /volume` sets or steps the volume and mutes, `GET /apps` lists
   what can be launched. No adb needed, so this keeps working on TVs where adb debugging drops its grant
@@ -65,7 +80,8 @@ streams) on your TV from your home-automation system, for **as long as you want*
   the overlay only becomes focusable when buttons are present (it never steals the remote
   otherwise), **OK** activates (POST `{popup, button, label, device, name}` to the `callback` URL
   and dismiss), **BACK** dismisses without an action.
-- **Countdown bar** (since 0.3.0) — `showProgress: true` animates a progress bar over a finite duration.
+- **Countdown bar** (since 0.3.0) — `showProgress: true` runs a bar down over a finite duration. Since 1.0.0
+  it runs on the clock, so the TV's animation speed (developer options) no longer shortens it.
 - **Urgency presets** (since 0.3.0) — `urgency: info|warning|critical` adds a blue/orange/red border.
 - **Custom border styling** (since 0.7.0) — `borderColor`, `borderWidth` and `cornerRadius` style the
   popup frame yourself; each field overrides its part of the `urgency` preset, so the preset stays a
@@ -87,7 +103,8 @@ streams) on your TV from your home-automation system, for **as long as you want*
 - **Poster** (since 0.17.0) — an optional `poster` (image URL) on `video` and `web` media: a still
   (e.g. a camera snapshot) shown over the stream area the moment the popup appears and faded out on
   the stream's first rendered frame. A live popup never opens as an empty box while the RTSP handshake
-  or WebView start-up runs; the stream area takes the poster's aspect, so still and live line up. If the
+  or WebView start-up runs. Optional `posterMode` controls how the image fits the requested
+  stream area without resizing it; omit it to keep poster-driven sizing. If the
   stream never paints the poster simply stays. On a web page that hosts a `<video>` (e.g. go2rtc's WebRTC
   viewer) the fade waits for actual playback (since 0.20.0), not for the page paint — so WebRTC + poster
   gives an instant still followed by near-realtime video. `/state.lastPopup.firstFrameMs` reports the time
@@ -139,7 +156,9 @@ streams) on your TV from your home-automation system, for **as long as you want*
   apart) and a definitive failure stops the service for a clean restart, instead of leaving a live
   process with a dead server behind.
 - **Self-update** (since 0.6.0) — the app checks the fork's GitHub releases twice a day and can install a
-  newer version itself: it announces a new release once on screen with an **Install** button, exposes
+  newer version itself: it announces a new release once on screen with an **Install** button (since
+  0.30.1 not when Home Assistant installs the updates by itself: ha-pipup ≥ 1.30.2 with automatic
+  updates on says so in a request header, and `/state.update.haManaged` shows it), exposes
   `update` in `/state`, and accepts `POST /update` to trigger the update (used by the Home Assistant
   integration's update entity). Android only accepts an APK signed with the same key, so a tampered
   download can never replace the app. On **Android 12+** the self-update is silent; on older devices the
@@ -208,6 +227,18 @@ records from is always running, so its answer comes in ~0.3 s. A separate "no au
 needed: with `muted` (the default) the app asks for video only. Check with go2rtc's `/api/streams`: a
 stream with consumers is warm.
 
+**On a LAN-only setup, consider leaving out go2rtc's STUN servers.** go2rtc answers a WHEP request only
+after it has gathered all its ICE candidates, including the ones it asks a STUN server for (by default
+`stun.l.google.com`). When that server is slow or blocked, the answer waits for it. @ckegel72 measured
+the first frame going from about 5.8 s to 1.7 s (#86) with:
+
+```yaml
+webrtc:
+  ice_servers: []
+```
+
+Only do this when the TV and go2rtc are on the same network: a viewer outside it needs those candidates.
+
 ### Keep the camera's keyframes under the TV's UDP buffer
 
 WebRTC sends each keyframe as one burst of UDP packets, and the TV's kernel has to hold that whole
@@ -238,7 +269,8 @@ picture and, for a stream nobody else pulls, the cold-start delay above.
 
 The poster (since 0.17.0) makes start-up time matter much less: a still of the same camera shows
 instantly and fades on the stream's first frame. For `whep` that moment comes from the app's own
-`<video>` element. For a `web` page the app injects a watcher: since 0.20.0 the poster waits until
+`<video>` element. Set `posterMode: "fit"` to keep the requested viewport when the snapshot
+has a different aspect from the video. For a `web` page the app injects a watcher: since 0.20.0 the poster waits until
 the page's video **actually plays** (not when the page paints), and since 0.20.1 there is no time limit
 once the page is seen to contain a `<video>`. Only a page where no video is ever found falls back to
 showing the page after 20 s.
@@ -246,7 +278,10 @@ showing the page after 20 s.
 ## Supported devices
 
 **Minimum: Android 6.0.1 (API 23).** Built for Android TV / Fire TV, but since 0.14.0 it also
-installs on plain-Android devices (projectors, TV boxes) and gets a normal launcher icon there.
+installs on plain-Android devices (projectors, TV boxes) and gets a normal launcher icon there. Since 0.31.0 the
+app's own screen follows the device's orientation, so it also works on a phone or tablet held upright (#80); the
+popups always did. Phones and tablets are not tested by the maintainer, and their battery optimisation may stop
+the background service: exclude PiPup from it if popups stop arriving.
 
 Everything core works on **every** supported version — popups (text, image, video, web, camera),
 muted media, TTS, remote-operable buttons, countdown bar, urgency/border styling, the icon beside the
@@ -292,6 +327,8 @@ Grab `install.sh` (Linux/macOS/WSL) or `install.ps1` (Windows) from the
 ```
 ./install.sh 192.168.1.10 192.168.1.11          # downloads the latest APK itself
 ./install.sh --power --apk PiPup.apk 192.168.1.10
+./install.sh --media --click com.plexapp.android 192.168.1.10   # 1.0.0: /media and /click
+./install.sh --apps --screen 192.168.1.10                       # 1.0.0: app in front and /screen.jpg
 # TCL Google TV: the accessibility keep-alive is enabled by default (see the TCL section)
 ```
 
@@ -299,7 +336,12 @@ It installs the APK, grants the app-ops below, starts the service and verifies o
 app is actually answering with the overlay permission in place. `--power` also activates the device
 admin (for screen off), `--accessibility` enables the fallback for that, and `--force-uninstall`
 handles a differently-signed build that is already installed — note that uninstalling wipes the
-app's stable device id, so Home Assistant sees a new device afterwards.
+app's stable device id, so Home Assistant sees a new device afterwards. Since 1.0.0, `--media` gives
+access to the [media sessions](#media-sessions) and `--click <apps>` enables
+[clicking](#pressing-a-button-in-an-app) in the apps you list (`--no-click` switches it off again).
+Since 1.0.0, `--apps` gives usage access for [the app in front](#the-app-in-front), and `--screen`
+switches [the picture of the screen](#a-picture-of-the-screen) on with a new token that it prints once
+(`--screen-token <token>` to give your own, `--no-screen` to switch it off).
 
 Sleeping TVs are **left asleep**: the service is started in the background, which does not touch
 what is on screen. On a TCL Google TV use `--wake`, because its vendor guard freezes a service
@@ -377,8 +419,11 @@ A second owner whose TCL had been dropping off for weeks went from 500 to 100 wi
 switch off every other accessibility service on the set:
 
 ```
-adb shell 'cur=$(settings get secure enabled_accessibility_services); settings put secure enabled_accessibility_services "${cur:+$cur:}nl.rogro82.pipup/nl.rogro82.pipup.PiPupAccessibilityService"; settings put secure accessibility_enabled 1'
+adb shell 'cur=$(settings get secure enabled_accessibility_services); [ "$cur" = null ] && cur=; settings put secure enabled_accessibility_services "${cur:+$cur:}nl.rogro82.pipup/nl.rogro82.pipup.PiPupAccessibilityService"; settings put secure accessibility_enabled 1'
 ```
+
+(`settings get` prints `null` when nothing is enabled yet; before 1.0.0 this snippet kept that as an
+entry, `null:nl.rogro82.pipup/…`. Harmless — Android skips it — and `install.sh` removes it.)
 
 Like every grant it survives updates via `install.sh`, which re-applies it. The two mechanisms below are
 what you are up against without it, and how to recover a TV that is already stuck.
@@ -455,6 +500,19 @@ trust boundary the network itself.
 - Since 0.29.0 the port also takes `/launch`, `/key` and `/volume`: anyone on the LAN can start an app,
   pause what is playing or change the volume — what a guest with the remote can do, no more. `/launch`
   only starts apps and links; it cannot install, grant or change anything.
+- Since 1.0.0, with media session access granted, anyone on the LAN can read what is playing (app and
+  title) and seek in it. `/click` presses buttons, but only with the control service switched on and only
+  in the apps you listed; both are set over adb, so nothing on the LAN can widen them, and the service
+  never reports what is on the screen. Within a listed app, though, anyone on the LAN can press **any**
+  view by its id, so list only apps where that is harmless (a player, not a store with a Buy button).
+  `/state.control.clickPackages` shows the list.
+- Since 1.0.0, with usage access granted, anyone on the LAN can read which app is in front (its
+  package name and since when). `/screen.jpg` shows **what is on the screen**, which is the most
+  sensitive thing on this port, so it is the one path with a login: it stays off until you set a token
+  over adb, and answers only a request that carries that token. Nothing on the LAN can switch it on or
+  read the token back. The token travels as plain HTTP like everything else here, so someone who can
+  listen in on the network segment can pick it up; the picture itself is not encrypted either. Leave it
+  off on a TV where that matters. Protected video (Netflix, Prime Video, …) comes out black.
 - Since 0.29.0 nothing of PiPup goes into an Android backup or a device-to-device transfer: settings
   include the push webhook URL (anyone holding it can post to it) and the stable device id, which would
   make a new TV show up as the old one. A new or restored TV starts clean and is discovered as a new
@@ -512,6 +570,13 @@ to `true` (no audio track is requested); `poster` and `transparent` work as for 
 offer or a dropped connection it retries with backoff (1, 2, 4, then every 8 s).
 `/state.lastPopup.mediaError` holds the last error (for example `HTTP 404` for an unknown stream
 name); with adb, `logcat -s PopupView` shows a timeline per attempt (offer, answer, track, playing).
+
+A WHEP endpoint behind basic authentication (since 0.29.0), such as go2rtc with `api.username` and
+`api.password`, takes the credentials in the URL: `http://user:password@go2rtc:1984/api/webrtc?src=doorbell`.
+The app removes them from the URL and sends them as an `Authorization: Basic` header, because a
+browser refuses a request to a URL that carries credentials. Percent-encode reserved characters in the
+password (`@` as `%40`, `:` as `%3A`). Wrong credentials show as `HTTP 401` in `mediaError`. The tiles of
+a camera wall (`grid`) take credentials the same way.
 
 #### Full-screen popups
 
@@ -574,6 +639,25 @@ match. If the poster fails to load nothing happens; if the stream never paints, 
 ```json
 { "video": { "uri": "rtsp://cam/sub", "width": 640, "poster": "http://frigate:5000/api/cam/latest.jpg" }}
 ```
+
+`posterMode` (optional, `video`, `web`, `whep`): controls the poster inside the requested media
+area. Any recognized value prevents the **poster** from resizing that area; it does not change
+live video scaling. For `video`, the first frame can still resize the area to the stream's display
+aspect. Set `width` and `height` to the desired video dimensions.
+
+| Value | Poster display |
+|---|---|
+| `fit` | Center the whole image, preserve aspect; unused space may remain |
+| `fill` | Fill the area, preserve aspect; crop the excess at the center |
+| `stretch` | Fill the area by stretching the image independently in each direction |
+| `center` | Center at the image's original size, without scaling; clip anything outside |
+| omitted or unrecognized | Preserve the existing poster sizing and stretching behavior |
+
+```json
+{ "whep": { "uri": "http://go2rtc:1984/api/webrtc?src=doorbell", "width": 640, "height": 360,
+  "poster": "http://frigate:5000/api/doorbell/latest.jpg", "posterMode": "fit" }}
+```
+
 `softwareDecoder` (since 0.17.2, video only, default *automatic*): `true` decodes in software and never
 touches the vendor hardware decoder; `false` forces the hardware decoder; absent = automatic — software on
 **Android < 8** and wherever an **Amlogic** H.264 decoder is present, hardware everywhere else. Reason: on
@@ -585,6 +669,21 @@ hardware. `/state.lastPopup.media.softwareDecoder` echoes the requested value (`
 
 ```json
 { "video": { "uri": "rtsp://cam/sub", "width": 640, "softwareDecoder": true }}
+```
+
+`bufferMs` (since 0.31.0, video only, ms, optional): low-latency playback of a live stream. ExoPlayer waits for
+2.5 s of media before it starts, and a live source can't run ahead of real time, so an RTSP popup stays 3–4 s
+behind the camera for as long as it is open. With `bufferMs` playback starts once that much is buffered, resumes
+after a stall at twice that, and the delay stays near the value. Clamped to 100–10000; absent = ExoPlayer's
+defaults. Meant for **RTSP** (intercom, doorbell talk-back); with HLS the playlist sets the delay, and a small
+buffer there mostly adds stalls. Measured by @t476r9js8z-code on a Chromecast with Google TV (RTSP over TCP from
+MediaMTX): default 3–4 s, `300` ≈ 2 s, `150` ≈ 1 s (#79). With a very small buffer, audio/video sync relies on the
+stream's timestamps: a WebRTC → RTSP restream can start its audio and video clocks at different offsets, which
+showed as video ahead of the voice at 150 ms; re-stamping on the server (ffmpeg `-use_wallclock_as_timestamps 1`)
+fixed it. `/state.lastPopup.media.bufferMs` echoes the value.
+
+```json
+{ "video": { "uri": "rtsp://192.168.1.20:8554/doorbell", "width": 640, "bufferMs": 200 }}
 ```
 
 `height` (since 0.28.0, video only, px, optional): the stream area's height until the first frame. Without it the
@@ -900,8 +999,13 @@ this device cannot do it, 400 for a malformed request.
 |---|---|---|
 | `/apps` | GET | — answers `{"apps": [{"package", "label", "tv"}]}`, sorted by label (`tv` = has a TV launcher entry) |
 | `/launch` | POST | `package=<name>` and/or `uri=<deep link>`; `wake=false` to leave a sleeping screen off |
-| `/key` | POST | `key=play_pause\|play\|pause\|stop\|next\|previous\|rewind\|fast_forward\|home\|back` |
+| `/key` | POST | `key=play_pause\|play\|pause\|stop\|next\|previous\|rewind\|fast_forward\|home\|back`; optionally `package=` for a media key (1.0.0) |
 | `/volume` | GET / POST | one of `level=0-100`, `step=up\|down`, `mute=on\|off\|toggle`; `ui=false` hides the volume bar |
+| `/click` | POST | `package=<name>`, `id=<resource id>`, `wait=<0-30 s>`, `method=click\|tap\|ok` — see [Pressing a button in an app](#pressing-a-button-in-an-app) (1.0.0) |
+| `/media` | GET | what is playing, in any app — see [Media sessions](#media-sessions) (1.0.0) |
+| `/media/seek` | POST | `ms=<position>` or `by=<+/- ms>`, optionally `package=` (1.0.0) |
+| `/media/art` | GET | the artwork of what is playing, as an image; optionally `package=` (1.0.0) |
+| `/screen.jpg` | GET | a picture of the screen; `width=<160-1920>`, header `X-PiPup-Token` — see [A picture of the screen](#a-picture-of-the-screen) (1.0.0) |
 
 ```
 curl -X POST "http://tv:7979/launch?package=com.netflix.ninja"
@@ -914,8 +1018,12 @@ curl -X POST "http://tv:7979/volume?level=30"
   Android's background-activity-start rules. A sleeping screen is woken first (unless `wake=false`).
   With only `uri`, Android picks the app that handles the link; add `package` to force one.
 - **Media keys** go to the app that currently holds the media session (Netflix, YouTube, Spotify,
-  Jellyfin, Kodi, …) — the same path as the play button on a Bluetooth remote. An app without a media
-  session ignores them.
+  Jellyfin, Kodi, …). With [media session access](#media-sessions) (since 1.0.0) they go straight into
+  that app's session as a transport control (play, pause, …), the way a phone's media notification
+  controls an app; `package=` picks the app. Without it they are sent as a media key event, the path of
+  the play button on a Bluetooth remote, which an app only acts on when it lists that action in its
+  playback state (Plex on a TCL did not). The answer's `via` says which: `session` or `media_key`. An
+  app without a media session ignores both.
 - **Home and back** need the accessibility service (`install.sh --accessibility`); without it they answer
   501 and are left out of `/state.control.keys`.
 - **Volume** is the media stream (`STREAM_MUSIC`). On a box whose volume belongs to the TV set or an
@@ -923,7 +1031,213 @@ curl -X POST "http://tv:7979/volume?level=30"
   `mute` are passed on and the platform forwards them over CEC where it can. A volume change, also one
   made with the remote, is pushed as `volume_changed`.
 - PiPup cannot see which app is in the foreground (that needs usage access, a grant with no screen on a
-  TV). `/state.control.lastLaunched` is only what PiPup itself started.
+  TV). `/state.control.lastLaunched` is only what PiPup itself started. With
+  [media session access](#media-sessions), `/state.media.package` shows which app plays.
+
+#### Pressing a button in an app
+
+Since 1.0.0 (#83). A deep link often stops on a title's page: Plex's `plex://…` opens the film but
+does not start it. `/click` presses a button there, the way the remote's OK would:
+
+```
+curl -X POST "http://tv:7979/click?package=com.plexapp.android&id=action-button-watch&wait=5&method=ok"
+# or in one call: open the page, wait for the button (10 s by default, up to 30), press it
+curl -X POST "http://tv:7979/launch?package=com.plexapp.android&uri=plex://…&click=action-button-watch&method=ok&wait=30"
+```
+
+`id` is the view's resource id: the full form (`com.app:id/play`), the bare name (`play`), or a Jetpack
+Compose test tag (`action-button-watch`). Find it with `adb shell uiautomator dump` and look at
+`resource-id`. A view that does not take a click itself is pressed through its nearest parent that does.
+
+`method` chooses how the button is pressed:
+- `click` (the default): an accessibility click. Works in apps built with Android views or Jetpack Compose.
+- `tap`: a short touch on the centre of the view that was found (Android 7+). For apps whose buttons
+  accept the accessibility click and then do nothing, such as **Plex** (React Native). **Only on devices
+  with touch input**: Android drops a tap from an app before it reaches the screen on Android 11 without
+  a touchscreen, and on Android 12+ without the `android.hardware.faketouch` feature — most TVs (a TCL
+  and a SHIELD on Android 11 answered "the tap was cancelled"). Android 7–10, such as Fire OS 7, deliver
+  it. `/state.control.tap` is `false` where it cannot work, and `tapUnavailable` says why.
+- `ok`: give the view the input focus, check that it has it, then press OK — what
+  the remote does, so it works on any TV. Android 13+ presses OK itself. **Below Android 13 an app cannot
+  press OK**: the answer is then `"pressed": false, "key": "KEYCODE_DPAD_CENTER"` and the caller presses
+  it, `adb shell input keyevent KEYCODE_DPAD_CENTER` (ha-pipup does that over its ADB connection).
+  `/state.control.okPressedBy` says `app` or `adb`. When the view does not take the focus, nothing is
+  pressed (OK would press whatever has it).
+
+`wait` is how long to wait for the view to appear, 0–30 s. A cold start of
+Plex, with its logo and profile screen, can take over 10 s.
+
+After the press the app watches the view for up to 1.5 s and answers `changed`: `true` when it left the
+screen, moved, or its app left the front (a player opened), `false` when nothing happened to it. Use
+it as a hint: a button that only changes its own label (play/pause) reads as `false` even though the
+press worked. A press that changes nothing answers about 1.5 s later than one that does.
+
+| Status | Meaning |
+|---|---|
+| 200 | `{"ok": true, "message": "tapped action-button-watch", "method": "tap", "changed": true}` (after `/launch`: also `launched`, `clicked`); `method=ok` adds `focused` and `pressed` (and `key` when the caller has to press OK) |
+| 400 | `package` or `id` missing, `wait` outside 0–30, or `method` other than `click`/`tap`/`ok` |
+| 403 | the app is not on the list of apps PiPup may press in |
+| 404 | the app is not on screen, or the view did not appear within `wait` |
+| 409 | another click is still running (one at a time) |
+| 500 | the view was found, but the app refused the click, Android refused or cancelled the tap, or (`ok`) the view would not take the focus |
+| 501 | the control service is not switched on; for `tap` also: no touch input on this device, Android older than 7, or a service switched on with an older beta and not restarted since (run `install.sh --click <apps>` again: it switches the service off and on) |
+
+**Off until you switch it on, and only in the apps you list.** Clicking runs in a separate
+accessibility service, "PiPup control"; the screen-off service keeps observing nothing. Both the service
+and the list of apps are set over adb only, never over the network:
+
+```
+./install.sh --click com.plexapp.android,com.google.android.youtube.tv <tv-ip>
+./install.sh --no-click <tv-ip>     # off again, list cleared
+```
+
+or by hand (keep any services already in the setting; when `settings get` prints `null`, leave
+`<current>:` out):
+
+```
+adb shell settings put secure enabled_accessibility_services <current>:nl.rogro82.pipup/nl.rogro82.pipup.PiPupControlService
+adb shell settings put secure accessibility_enabled 1
+adb shell am broadcast -f 0x20 -n nl.rogro82.pipup/.ControlConfigReceiver \
+    -a nl.rogro82.pipup.SET_CLICK_PACKAGES --es packages "com.plexapp.android"
+```
+
+The broadcast answers with the list as it now is (`data="com.plexapp.android"`); `--es packages ""` empties
+it, leaving the extra out only reads it. The service declares no events, so it receives nothing by itself: it
+reads a window only while a `/click` runs, only when the app in front is on the list, and it answers
+whether the click happened, never what is on the screen (the separately switched
+[picture of the screen](#a-picture-of-the-screen) of 1.0.0 aside). A `tap` touches only the centre of the view it
+found, during that same request. `/state.control.click` says whether the service is on,
+`/state.control.tap` whether it may tap, `/state.control.clickPackages` which apps are allowed.
+
+#### Media sessions
+
+Since 1.0.0 (#83). What is playing, in any app that has a media session (Netflix, YouTube, Plex,
+Spotify, Jellyfin, …), and seeking to an exact time:
+
+```
+curl "http://tv:7979/media"
+curl -X POST "http://tv:7979/media/seek?ms=2472000"     # to 41:12
+curl -X POST "http://tv:7979/media/seek?by=-10000"      # back 10 seconds
+```
+
+```json
+{
+  "access": true,
+  "package": "com.plexapp.android",
+  "state": "playing",
+  "positionMs": 2472000,
+  "positionUpdatedAt": "2026-11-05T16:20:00.000Z",
+  "durationMs": 5400000,
+  "speed": 1.0,
+  "title": "Bill & Ted's Excellent Adventure",
+  "artist": null,
+  "album": null,
+  "canSeek": true,
+  "actions": ["play", "pause", "stop", "seek"],
+  "artKey": "5f2c81d0"
+}
+```
+
+- `state` is `playing`, `paused`, `buffering` or `stopped`. `positionMs` is the position at
+  `positionUpdatedAt` (the moment of the answer); `null` fields are ones the app does not report.
+- With nothing playing: `{"access": true, "package": null}`. Of several sessions, the first one that plays
+  is reported, in Android's priority order.
+- **Only active sessions count.** Android lists a session only while the app marks it active. Most players
+  do that while they play (tested: Spotify on Fire TV), but not every app: SmartTube plays with an inactive
+  session and stays invisible here, as do apps that keep their session inactive while paused.
+- `/media/seek` takes exactly one of `ms` or `by`, and `package=` to seek in that app's session instead of
+  the reported one. It answers **409** when the app does not allow seeking (`canSeek: false`), **404**
+  when nothing plays.
+- The same object is in `/state.media`, and a change of app, state, title or artwork, or a seek, is pushed
+  at once as event `media` (the position moving on is not: work it out from `positionUpdatedAt` and `speed`).
+- `actions` lists what the app says it accepts: `play`, `pause`, `play_pause`, `stop`, `next`,
+  `previous`, `seek`, `rewind`, `fast_forward`. It is for diagnosing: `/key` sends play and pause into the
+  session either way, since some apps act on them without listing them.
+- `artKey` changes when the artwork does, and is `null` when the app shows none. `GET /media/art`
+  returns that artwork as JPEG (PNG when it has transparency), at most 600 px on its longest side, with
+  the same key in the `X-PiPup-Art-Key` header; **404** without artwork. PiPup fetches artwork that the app
+  only gives as a link itself, and never hands out the link (a media server's link can carry its token).
+
+Android hands media sessions to an app with an enabled notification listener. PiPup's listener only
+exists for that grant and reads no notifications. Give it once over adb (`install.sh --media`):
+
+```
+adb shell cmd notification allow_listener nl.rogro82.pipup/nl.rogro82.pipup.MediaListenerService
+```
+
+Without it, `/media` answers **501** and `/state.media` is `{"access": false, "reason": "not_granted"}`.
+On a device marked low-RAM (`getprop ro.config.low_ram`), Android ignores the grant: `reason` is then
+`low_ram`.
+
+#### The app in front
+
+Since 1.0.0 (#88). `/state` has a `foreground` object: the app on screen, also when nothing plays
+(the launcher, a menu, an app without a media session).
+
+```
+"foreground": { "package": "com.netflix.ninja", "label": "Netflix", "since": "2026-11-14T13:20:00Z" }
+```
+
+`label` is the app's name, or `null` when Android hides the app from PiPup (an app without a launcher
+entry). `since` is when it came to the front, in UTC. With a webhook set, a change is pushed as event
+`foreground` within about 5 seconds, while the screen is on.
+
+It takes usage access, which a TV has no settings screen for. Give it once over adb
+(`install.sh --apps`):
+
+```
+adb shell appops set nl.rogro82.pipup GET_USAGE_STATS allow
+```
+
+Without it `foreground` is `null` and `/state.permissions.usage` is `false`. PiPup reads only which
+app came to the front and when: package names, nothing of what is on the screen, and no accessibility
+service is involved.
+
+#### A picture of the screen
+
+Since 1.0.0 (#89), on **Android 11 and up**. `GET /screen.jpg` answers one JPEG of the screen: for a
+dashboard background when nothing with artwork plays, to see a stuck dialog, or to check that a popup
+appeared.
+
+```
+curl -H "X-PiPup-Token: <token>" -o screen.jpg "http://tv:7979/screen.jpg?width=640"
+```
+
+- `width=` is 160-1920 (640 when left out); the picture keeps its shape and is never enlarged.
+- The token goes in the header `X-PiPup-Token`, or as `Authorization: Bearer <token>`. Not in the URL,
+  which ends up in logs.
+- Asked again within a second, you get the picture just taken: Android allows about one per second.
+- Protected video (Netflix, Prime Video, …) comes out black, as with adb's `screencap`. PiPup's own
+  popups are in the picture.
+
+| Status | Meaning |
+|---|---|
+| 200 | the JPEG, with `Cache-Control: no-store` |
+| 400 | `width` is not 160-1920 |
+| 401 | no token, or a wrong one |
+| 409 | the screen is off |
+| 429 | asked too fast |
+| 501 | not switched on, Android older than 11, the control service is off, or it was switched on with an older beta and not restarted since (run `install.sh --screen` again) |
+
+**Off by default.** It is switched on by setting a token, and that can only be done over adb, like the
+click list. `install.sh --screen` does it all: it enables the control service, makes a random token,
+sets it and prints it once. By hand:
+
+```
+# the control service (if it is not on yet), then the token: 16-128 of A-Z a-z 0-9 _ -
+adb shell settings put secure enabled_accessibility_services \
+    "<current value>:nl.rogro82.pipup/nl.rogro82.pipup.PiPupControlService"
+adb shell am broadcast -f 0x20 -n nl.rogro82.pipup/.ControlConfigReceiver \
+    -a nl.rogro82.pipup.SET_SCREEN_TOKEN --es token "<your token>"
+# off again
+adb shell am broadcast -f 0x20 -n nl.rogro82.pipup/.ControlConfigReceiver \
+    -a nl.rogro82.pipup.SET_SCREEN_TOKEN --es token ""
+```
+
+The picture is taken by the same control service that presses buttons
+(`AccessibilityService.takeScreenshot`). Without a token it takes none; with one, it takes one per
+request and keeps nothing. `/state.control.screen` says whether `/screen.jpg` answers here, and
+`screenUnavailable` why not. The token itself is never reported.
 
 ### Permission screen
 
@@ -1056,7 +1370,8 @@ Two more keys:
   `replacedId`, both the id that was redrawn), `popup_removed` (with `reason`
   expired / cancelled / button / back / watchdog, and `removedId`), `started`, `screen_on`,
   `screen_off`, `permissions`, `volume_changed` and `control` (after a launch, key or volume call;
-  since 0.29.0), and `settings` right after the webhook is set. A failed POST is
+  since 0.29.0), `media` (what plays changed, or a seek; since 1.0.0), and `settings` right after the
+  webhook is set. A failed POST is
   retried once after 2 s. Empty turns push off. `/settings` answers only whether one is set: the URL
   is the controller's secret. `/state.push` shows the last push result.
 - `updateSource`: `github:<owner>/<repo>` (default `github:mhoogenbosch/PiPup`), or an `http(s)` folder
@@ -1105,6 +1420,14 @@ Returns the current state as JSON:
   }
 }
 ```
+
+Since 1.0.0 `foreground` is [the app in front](#the-app-in-front) (`null` without usage access),
+`permissions.usage` says whether that access is there, and `control` has `screen` and
+`screenUnavailable` for [the picture of the screen](#a-picture-of-the-screen).
+
+Since 1.0.0 `control` also has `click` (the control service is on), `tap` (it may tap) and
+`clickPackages` (the apps it may press in), and `media` is what plays, as in
+[Media sessions](#media-sessions).
 
 Since v0.29.0 `control` lists what [TV control](#tv-control) can do here, and `volume` the media volume
 (`fixed: true` = it belongs to the TV set or amplifier).

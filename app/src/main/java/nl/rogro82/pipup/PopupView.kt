@@ -1,6 +1,5 @@
 package nl.rogro82.pipup
 
-import android.animation.ObjectAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
@@ -8,11 +7,11 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
 import android.net.Uri
 import android.util.Log
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.view.animation.LinearInterpolator
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -26,6 +25,7 @@ import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import android.os.Build
 import androidx.media3.common.MimeTypes
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
@@ -120,16 +120,20 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
         frame.clipToOutline = clip > 0f
     }
 
-    /// `onSized` receives the poster's intrinsic width/height once decoded, so the caller can
-    /// give the stream area the poster's aspect ratio right away. A camera snapshot has the same
-    /// aspect as the camera's stream, so still and live then line up exactly and the hand-over
-    /// shows no size jump (a provisional 16:9 box letterboxed a 4:3 snapshot, then jumped).
+    /// An explicit poster mode scales only the image; otherwise the poster may size the stream area.
     protected fun attachPoster(frame: FrameLayout, url: String?, params: FrameLayout.LayoutParams,
+                               posterMode: String? = null,
                                onSized: ((Int, Int) -> Unit)? = null) {
         attachLiveBadge(frame)   // every live stream area gets its poster here, so its badge too
         if (url.isNullOrEmpty()) return
+        val mode = parsePosterMode(posterMode)
         val iv = ImageView(context).apply {
-            scaleType = ImageView.ScaleType.FIT_XY   // box already has the image's aspect
+            scaleType = when (mode) {
+                PosterMode.Fit -> ImageView.ScaleType.FIT_CENTER
+                PosterMode.Fill -> ImageView.ScaleType.CENTER_CROP
+                PosterMode.Center -> ImageView.ScaleType.CENTER
+                PosterMode.Stretch, null -> ImageView.ScaleType.FIT_XY
+            }
             setBackgroundColor(Color.TRANSPARENT)
         }
         frame.addView(iv, params)   // added after the stream view => drawn on top
@@ -141,7 +145,9 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
                     override fun onResourceReady(resource: android.graphics.Bitmap, transition: Transition<in android.graphics.Bitmap>?) {
                         if (mPoster !== iv) return   // already handed over / destroyed
                         iv.setImageBitmap(resource)
-                        if (resource.width > 0 && resource.height > 0) onSized?.invoke(resource.width, resource.height)
+                        if (mode == null && resource.width > 0 && resource.height > 0) {
+                            onSized?.invoke(resource.width, resource.height)
+                        }
                     }
                     override fun onLoadCleared(placeholder: android.graphics.drawable.Drawable?) { iv.setImageDrawable(null) }
                     override fun onLoadFailed(errorDrawable: android.graphics.drawable.Drawable?) {
@@ -177,7 +183,7 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
         mPoster = null
     }
 
-    private var mProgressAnimator: ObjectAnimator? = null
+    private var mProgressTicker: Runnable? = null
 
     open fun create() {
         inflate(context, R.layout.popup,this)
@@ -352,19 +358,26 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
             addView(bar, LayoutParams(LayoutParams.MATCH_PARENT, 8).apply {
                 setMargins(0, 12, 0, 0)
             })
-            mProgressAnimator = ObjectAnimator.ofInt(bar, "progress", 1000, 0).apply {
-                duration = popup.duration * 1000L
-                interpolator = LinearInterpolator()
-                start()
+            // Driven by the clock, not by an animator: Android scales every animator with
+            // the TV's "Animator duration scale" (developer options), so at 0.5x the bar of
+            // a 20 s popup was empty after 10 s, and at 0 (animations off) at once (#89).
+            val total = popup.duration * 1000L
+            val startedAt = SystemClock.elapsedRealtime()
+            val ticker = object : Runnable {
+                override fun run() {
+                    if (mProgressTicker !== this) return  // destroyed
+                    val left = total - (SystemClock.elapsedRealtime() - startedAt)
+                    bar.progress = if (left <= 0 || total <= 0) 0 else (left * 1000 / total).toInt()
+                    if (left > 0) bar.postOnAnimation(this)
+                }
             }
+            mProgressTicker = ticker
+            bar.post(ticker)
         }
     }
 
     open fun destroy() {
-        try {
-            mProgressAnimator?.cancel()
-        } catch (_: Throwable) {}
-        mProgressAnimator = null
+        mProgressTicker = null  // the ticker stops itself on its next frame
     }
 
     /// Entrance animation (0.19.0). Runs once per *build*: an update-in-place reuses
@@ -494,7 +507,8 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
             frame.addView(textureView)
             val provisionalHeight = provisionalVideoHeight(media.width, media.height)
             attachPoster(frame, media.poster,
-                FrameLayout.LayoutParams(media.width, provisionalHeight).apply { gravity = Gravity.CENTER }
+                FrameLayout.LayoutParams(media.width, provisionalHeight).apply { gravity = Gravity.CENTER },
+                posterMode = media.posterMode
             ) { pw, ph ->
                 posterVideoHeight(media.width, media.height, pw, ph)?.let { sizeTo(media.width, it) }
             }
@@ -514,14 +528,24 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
             // 6.0.1, OMX.amlogic.avc.decoder.awesome; the TCL on Android 8 was fine). There
             // we prefer the software decoders (OMX.google.* / c2.android.*), which never
             // touch that layer. `softwareDecoder` in the payload overrides the automatic rule.
-            val software = media.softwareDecoder ?: autoSoftwareDecoder()
+            val software = media.softwareDecoder ?: DecoderChoice.autoSoftware()
             Log.i(LOG_TAG, "video decoder: ${if (software) "software (preferred)" else "hardware (default)"}" +
                 " [auto=${media.softwareDecoder == null}, sdk=${Build.VERSION.SDK_INT}]")
             val renderers = DefaultRenderersFactory(context)
                 .setEnableDecoderFallback(true)
                 .setMediaCodecSelector(if (software) SOFTWARE_FIRST_SELECTOR else MediaCodecSelector.DEFAULT)
 
-            mExoPlayer = ExoPlayer.Builder(context, renderers).build().apply {
+            val builder = ExoPlayer.Builder(context, renderers)
+            lowLatencyBufferDurations(media.bufferMs)?.let { (minMs, maxMs, startMs, rebufferMs) ->
+                builder.setLoadControl(
+                    DefaultLoadControl.Builder()
+                        .setBufferDurationsMs(minMs, maxMs, startMs, rebufferMs)
+                        .setPrioritizeTimeOverSizeThresholds(true)
+                        .build()
+                )
+                Log.i(LOG_TAG, "video: low-latency buffer, start ${startMs} ms")
+            }
+            mExoPlayer = builder.build().apply {
                 setVideoTextureView(textureView)
                 if (media.muted) {
                     // no audio track at all: avoid grabbing the audio output from whatever plays
@@ -577,19 +601,8 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
                 val infos = MediaCodecUtil.getDecoderInfos(mimeType, requiresSecureDecoder, requiresTunnelingDecoder)
                 if (MimeTypes.isVideo(mimeType)) infos.sortedBy { if (it.softwareOnly) 0 else 1 } else infos
             }
-
-            /// Automatic rule: software on Android < 8 (old vendor decoders, the projector
-            /// class of devices) and wherever an Amlogic decoder is present, hardware elsewhere.
-            @UnstableApi
-            fun autoSoftwareDecoder(): Boolean {
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
-                return try {
-                    MediaCodecUtil.getDecoderInfos(MimeTypes.VIDEO_H264, false, false)
-                        .any { it.name.contains("amlogic", ignoreCase = true) }
-                } catch (e: Throwable) {
-                    false
-                }
-            }
+            // The automatic rule (software on Android < 8 and with an Amlogic decoder) lives in
+            // DecoderChoice since 0.32.0-beta.4: decided once, off the main thread.
         }
     }
 
@@ -733,7 +746,8 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
 
             frame.addView(webView, layoutParams)
             attachPoster(frame, media.poster,
-                FrameLayout.LayoutParams(media.width, media.height).apply { gravity = Gravity.CENTER }
+                FrameLayout.LayoutParams(media.width, media.height).apply { gravity = Gravity.CENTER },
+                posterMode = media.posterMode
             ) { pw, ph ->
                 // Give the web view the poster's aspect at the requested width, so still and
                 // live stream match (an MJPEG page scales the image to the view width anyway).
@@ -802,7 +816,7 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
                 }
                 setBackgroundColor(if (media.transparent) Color.TRANSPARENT else Color.BLACK)
                 val origin = try {
-                    val u = android.net.Uri.parse(media.uri)
+                    val u = android.net.Uri.parse(splitUrlCredentials(media.uri).first)
                     "${u.scheme}://${u.encodedAuthority}/"
                 } catch (_: Throwable) { null }
                 loadDataWithBaseURL(origin, whepPage(media), "text/html", "utf-8", null)
@@ -813,9 +827,9 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
                 gravity = Gravity.CENTER
             })
             attachPoster(frame, media.poster,
-                FrameLayout.LayoutParams(media.width, media.height).apply { gravity = Gravity.CENTER }
+                FrameLayout.LayoutParams(media.width, media.height).apply { gravity = Gravity.CENTER },
+                posterMode = media.posterMode
             ) { pw, ph ->
-                // the camera's aspect, from its snapshot: video and still line up exactly
                 val h = (media.width.toLong() * ph / pw).toInt()
                 webView.layoutParams = FrameLayout.LayoutParams(media.width, h).apply { gravity = Gravity.CENTER }
                 mPoster?.layoutParams = FrameLayout.LayoutParams(media.width, h).apply { gravity = Gravity.CENTER }
@@ -880,7 +894,7 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
                 }
                 setBackgroundColor(Color.BLACK)
                 val origin = try {
-                    val u = android.net.Uri.parse(media.tiles.first().uri)
+                    val u = android.net.Uri.parse(splitUrlCredentials(media.tiles.first().uri).first)
                     "${u.scheme}://${u.encodedAuthority}/"
                 } catch (_: Throwable) { null }
                 loadDataWithBaseURL(origin, gridPage(media), "text/html", "utf-8", null)
@@ -917,20 +931,28 @@ sealed class PopupView(context: Context, val popup: PopupProps) : LinearLayout(c
         const val LOG_TAG = "PopupView"
 
         /// The WHEP player page. The endpoint URL goes in as a JSON string literal
-        /// (JSONObject.quote), never spliced raw into the script.
-        fun whepPage(media: PopupProps.Media.Whep): String =
-            WHEP_PAGE
-                .replace("__URL__", org.json.JSONObject.quote(media.uri))
+        /// (JSONObject.quote), never spliced raw into the script. Credentials in the URL
+        /// (http://user:pass@host:1984/...) are split off and sent as a Basic Authorization
+        /// header, because fetch() refuses a URL that carries them.
+        fun whepPage(media: PopupProps.Media.Whep): String {
+            val (url, credentials) = splitUrlCredentials(media.uri)
+            return WHEP_PAGE
+                .replace("__URL__", org.json.JSONObject.quote(url))
+                .replace("__CREDENTIALS__", credentials?.let { org.json.JSONObject.quote(it) } ?: "null")
                 .replace("__MUTED__", if (media.muted) "true" else "false")
                 .replace("__BG__", if (media.transparent) "transparent" else "#000")
+        }
 
         /// The camera-wall page (0.29.0). The tiles go in as one JSON array (JSONArray
-        /// quoting), never spliced raw into the script.
+        /// quoting), never spliced raw into the script. Credentials in a tile's URL are sent
+        /// as a Basic Authorization header, as in [whepPage].
         fun gridPage(media: PopupProps.Media.Grid): String {
             val tiles = org.json.JSONArray()
             media.tiles.forEach { t ->
+                val (url, credentials) = splitUrlCredentials(t.uri)
                 tiles.put(org.json.JSONObject().apply {
-                    put("uri", t.uri)
+                    put("uri", url)
+                    put("credentials", credentials ?: org.json.JSONObject.NULL)
                     put("label", if (media.labels) (t.label ?: "") else "")
                     put("poster", t.poster ?: "")
                 })
@@ -962,6 +984,7 @@ font:500 15px sans-serif;color:#fff;background:rgba(0,0,0,.55)}
   var stopped = false, anyPlaying = false, stops = [];
   var T0 = Date.now(); function lg(m){ console.log('whep grid +' + (Date.now() - T0) + 'ms ' + m); }
   function title(t){ document.title = 'pipup:' + t; }
+  function basic(c){ var b = new TextEncoder().encode(c), s = ''; for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s); }
   window.__pipupStop = function(){ stopped = true; stops.forEach(function(f){ try { f(); } catch(e) {} }); };
   TILES.forEach(function(t, i){
     var box = document.createElement('div'); box.className = 't';
@@ -1011,8 +1034,9 @@ font:500 15px sans-serif;color:#fff;background:rgba(0,0,0,.55)}
       p.createOffer().then(function(o){ return p.setLocalDescription(o); })
         .then(function(){ return gathered(p); })
         .then(function(){
-          return fetch(t.uri, { method: 'POST', headers: { 'Content-Type': 'application/sdp' },
-                                body: p.localDescription.sdp });
+          var headers = { 'Content-Type': 'application/sdp' };
+          if (t.credentials) headers['Authorization'] = 'Basic ' + basic(t.credentials);
+          return fetch(t.uri, { method: 'POST', headers: headers, body: p.localDescription.sdp });
         })
         .then(function(r){ if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
         .then(function(sdp){ if (p !== pc) return; return p.setRemoteDescription({ type: 'answer', sdp: sdp }); })
@@ -1032,11 +1056,12 @@ font:500 15px sans-serif;color:#fff;background:rgba(0,0,0,.55)}
 video{width:100%;height:100%;object-fit:contain;background:__BG__}</style></head>
 <body><video id="v" autoplay playsinline></video><script>
 (function(){
-  var URL_ = __URL__, MUTED = __MUTED__;
+  var URL_ = __URL__, CREDENTIALS = __CREDENTIALS__, MUTED = __MUTED__;
   var v = document.getElementById('v'); v.muted = MUTED;
   var pc = null, stopped = false, attempt = 0, playing = false, timer = null;
   var T0 = Date.now(); function lg(m){ console.log('whep +' + (Date.now() - T0) + 'ms ' + m); }
   function title(t){ document.title = 'pipup:' + t; }
+  function basic(c){ var b = new TextEncoder().encode(c), s = ''; for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s); }
   function err(m){ title('error:' + String(m).slice(0, 120)); }
   function retry(){
     if (stopped || timer) return;
@@ -1082,7 +1107,9 @@ video{width:100%;height:100%;object-fit:contain;background:__BG__}</style></head
       .then(function(){ return gathered(p); })
       .then(function(){ lg('gathered ' + p.iceGatheringState); })
       .then(function(){
-        return fetch(URL_, { method: 'POST', headers: { 'Content-Type': 'application/sdp' },
+        var headers = { 'Content-Type': 'application/sdp' };
+        if (CREDENTIALS) headers['Authorization'] = 'Basic ' + basic(CREDENTIALS);
+        return fetch(URL_, { method: 'POST', headers: headers,
                              body: p.localDescription.sdp });
       })
       .then(function(r){
@@ -1216,6 +1243,18 @@ video{width:100%;height:100%;object-fit:contain;background:__BG__}</style></head
         }
     }
 }
+/// Splits credentials off a URL: `http://user:pass@host:1984/api/webrtc?src=x` gives
+/// (`http://host:1984/api/webrtc?src=x`, `user:pass`), percent-decoded so a password can
+/// carry reserved characters. A URL without credentials comes back unchanged, with null.
+internal fun splitUrlCredentials(url: String): Pair<String, String?> {
+    val start = url.indexOf("://").let { if (it < 0) return url to null else it + 3 }
+    val end = url.indexOfAny(charArrayOf('/', '?', '#'), start).let { if (it < 0) url.length else it }
+    val at = url.lastIndexOf('@', end - 1)
+    if (at < start) return url to null
+    val credentials = java.net.URLDecoder.decode(url.substring(start, at).replace("+", "%2B"), "UTF-8")
+    return url.substring(0, start) + url.substring(at + 1) to credentials
+}
+
 /// Popup video height for [targetWidth] that keeps the stream's *display* aspect.
 /// Stored width/height alone is the wrong shape for anamorphic streams: NVR substreams
 /// commonly send 640x360 or 704x480 with a non-square sample aspect (e.g. 3:4 for a 4:3
@@ -1224,6 +1263,18 @@ internal fun heightForDisplayAspect(targetWidth: Int, width: Int, height: Int, p
     val ratio = if (pixelWidthHeightRatio > 0f) pixelWidthHeightRatio else 1f
     val displayWidth = width * ratio
     return Math.round(targetWidth * height / displayWidth)
+}
+
+/// ExoPlayer buffer durations for `bufferMs` (#79), as min, max, start, start-after-rebuffer
+/// in ms, or null for ExoPlayer's defaults. Playback starts once [bufferMs] is buffered and
+/// resumes after a stall at twice that; a live source can't run ahead of real time, so the
+/// buffer - and the delay behind the camera - stays near [bufferMs]. Clamped to 100..10000 ms.
+/// The order satisfies DefaultLoadControl's checks: max >= min >= start and >= rebuffer.
+internal fun lowLatencyBufferDurations(bufferMs: Int?): List<Int>? {
+    val start = bufferMs?.coerceIn(100, 10_000) ?: return null
+    val rebuffer = start * 2
+    val min = maxOf(rebuffer, 1_000)
+    return listOf(min, maxOf(min * 2, 5_000), start, rebuffer)
 }
 
 /// Stream-area height before the first frame: an explicit [requestedHeight], else 16:9.
